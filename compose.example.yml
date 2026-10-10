@@ -1,0 +1,51 @@
+# pv-icloud — Docker Compose TEMPLATE.
+#   cp compose.example.yml compose.yml                   # per deployment, gitignored
+#   cp pv-icloud.env.example pv-icloud.env               # secrets, gitignored
+#   cp config/pv-icloud.example.yaml config/pv-icloud.yaml   # accounts + token hashes
+#   docker compose up -d
+#
+# What lives where:
+#   PERSISTED  /data      Per-account SQLite mail index (mail bodies!). Back it with an
+#                         encrypted disk. Losing it is recoverable: the server re-downloads
+#                         the index window from iCloud on the next start (slow: ~5 msg/s).
+#   MOUNTED    /config    Your pv-icloud.yaml, read-only. Lives with the deployment.
+#   SECRETS    env_file   iCloud Apple ID + app-specific password per account.
+#   EPHEMERAL  /tmp       tmpfs; nothing else in the container is writable.
+
+services:
+  pv-icloud:
+    # Pin by digest in production; each GitHub Release lists the digest.
+    image: ghcr.io/happycynic/pv-icloud:latest
+    restart: unless-stopped
+    env_file: pv-icloud.env
+    ports:
+      # No TLS and bearer-token auth only: publish on a private interface (LAN, VPN,
+      # Tailscale) or put a TLS reverse proxy in front. Never expose directly to the internet.
+      - "127.0.0.1:8771:8771"
+    volumes:
+      # MOUNTED (read-only): deployment config.
+      - ./config/pv-icloud.yaml:/config/pv-icloud.yaml:ro
+      # PERSISTED: mail index. Named volume by default (Docker creates it owned by the
+      # image user). To use a host path instead, e.g. on an encrypted disk:
+      #   - /path/to/encrypted/pv-icloud:/data
+      # and `chown 10001:10001` that directory first (the image runs as 10001:10001).
+      - pv-icloud-data:/data
+    # Hardening: read-only root FS, no capabilities, no privilege escalation.
+    # Don't set `user:` — the image already runs as 10001:10001.
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 512m
+    # Outbound traffic: to restrict it to iCloud with host firewall rules, give the container
+    # its own subnet (uncomment both `networks:` sections) and see docs/egress.md.
+    # networks: [pv-icloud]
+
+volumes:
+  pv-icloud-data:
+
+# networks:
+#   pv-icloud:
+#     ipam:
+#       config:
+#         - subnet: 172.30.71.0/24   # any free subnet; used by the egress rules

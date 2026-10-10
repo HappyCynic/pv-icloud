@@ -1,0 +1,43 @@
+# pv-icloud configuration TEMPLATE. Copy to pv-icloud.yaml (gitignored) and fill in.
+# The real file is per deployment (the dev container copies this on first start; a server
+# gets its own copy, e.g. from configuration management). Not secret: tokens are SHA-256
+# hashes and iCloud credentials come from env (PV_ICLOUD_<ID>_ICLOUD_USER / _APP_PASSWORD).
+# See docs/adr/0003-multi-account.md.
+#
+# Generate a token and its hash:
+#   uv run pv-icloud hash-token
+
+defaults:
+  mail:
+    # Folder names are display names; the server decodes IMAP modified UTF-7.
+    folders: { include: "*", exclude: [] }
+    # iCloud system folders. false (the default) hides the folder whatever `include` says;
+    # true treats it like any other folder (include/exclude still apply). Set per account
+    # under accounts[].mail.special_folders to override these defaults.
+    special_folders:
+      junk: false              # Junk
+      deleted_messages: false  # Deleted Messages
+      drafts: false            # Drafts
+    max_age_days: 730          # index backfill window; searches clamp to it
+    max_connections: 2         # per account (iCloud limit is per Apple ID)
+  calendar:
+    # Calendar display names, globs allowed; applies to subscribed calendars too.
+    calendars: { include: "*", exclude: [] }
+    max_range_days: 90         # longest calendar_events range
+    max_search_days: 730       # longest calendar_search range
+    # Subscribed (webcal) calendars: iCloud does not serve their events, so the server can
+    # fetch each feed from its publisher. Off here: true makes outbound HTTPS requests to
+    # those publishers (any public host; see docs/egress.md). false = listed, no events.
+    subscriptions: false
+    # timezone: America/Chicago  # for date-only ranges; default: the iCloud calendar's zone
+  contacts:
+    enabled: true              # false: no contacts tools; find_person uses mail only
+    # Contacts in these groups are hidden from every tool (group names, globs allowed).
+    exclude_groups: []
+
+accounts:
+  - id: me
+    tokens:
+      - { label: laptop, sha256: "REPLACE_ME" }
+    mail:
+      folders: { exclude: [] }

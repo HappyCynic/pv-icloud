@@ -1,0 +1,54 @@
+{
+  "name": "Private iCloud MCP (pv-icloud)",
+  // Compose so each machine can add its own mounts in compose.local.yaml (gitignored)
+  // without editing committed files; see compose.local.example.yaml.
+  "dockerComposeFile": ["compose.yaml", "compose.local.yaml"],
+  "service": "dev",
+  "workspaceFolder": "/workspaces/pv-icloud",
+  "shutdownAction": "stopCompose",
+  "remoteUser": "vscode",
+
+  "features": {
+    // Build/run the production image against the host's Docker daemon.
+    // moby packages don't exist for Debian trixie; use Docker's upstream CLI.
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": { "moby": false },
+    "ghcr.io/devcontainers/features/github-cli:1": {},
+    // claude-code needs node+npm; without this it falls back to Debian's
+    // nodejs package, which ships no npm, and the build fails.
+    "ghcr.io/devcontainers/features/node:2": { "version": "lts" },
+    "ghcr.io/anthropics/devcontainer-features/claude-code:1": {}
+  },
+
+  // Runs on the host: creates the gitignored local files (credentials, compose override,
+  // config) from their templates so the container never references a missing file.
+  "initializeCommand": "sh .devcontainer/initialize.sh",
+
+  "forwardPorts": [8771],
+  "portsAttributes": {
+    "8771": { "label": "pv-icloud MCP", "onAutoForward": "silent" }
+  },
+
+  "postCreateCommand": "bash .devcontainer/post-create.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "tamasfe.even-better-toml",
+        "redhat.vscode-yaml",
+        "ms-azuretools.vscode-containers",
+        "qwtel.sqlite-viewer"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "/home/vscode/.venv/bin/python",
+        "python.testing.pytestEnabled": true,
+        "[python]": {
+          "editor.defaultFormatter": "charliermarsh.ruff",
+          "editor.formatOnSave": true
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,15 @@
+# Personal additions to compose.yaml. Copied to compose.local.yaml (gitignored) on first
+# start; edit that copy, then "Rebuild Container".
+#
+# Example: use the host's own SSH agent and SSH config instead of the editor's forwarded
+# agent, e.g. a 1Password agent with OrbStack or Docker Desktop on macOS (both provide the
+# agent at /run/host-services/ssh-auth.sock). When /run/ssh-agent.sock exists,
+# post-create.sh points ssh and git commit signing at it.
+#
+# services:
+#   dev:
+#     volumes:
+#       - ${HOME}/.ssh:/home/vscode/.ssh-host:ro
+#       - /run/host-services/ssh-auth.sock:/run/ssh-agent.sock
+services:
+  dev: {}

@@ -1,0 +1,24 @@
+.DS_Store
+.devcontainer/devcontainer.env
+# Per-deployment config (accounts, token hashes, folder excludes); template is committed.
+config/pv-icloud.yaml
+compose.yml
+pv-icloud.env
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+dist/
+
+# Local data (mail indexes hold message bodies)
+/data/
+*.sqlite3
+*.db
+
+# Dev container: per-machine compose additions
+.devcontainer/compose.local.yaml

@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: 2026 Happy Cynic Software LLC
+# SPDX-License-Identifier: Apache-2.0
+
+# Weekly update pull requests. CI must pass before anything is merged; check release notes
+# for runtime dependencies, which ship in the image.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      actions: { patterns: ["*"] }
+  - package-ecosystem: uv
+    directory: /
+    schedule: { interval: weekly }
+    groups:
+      dev-dependencies: { dependency-type: development }
+  # Base images, pinned by digest in both Dockerfiles.
+  - package-ecosystem: docker
+    directories: [/, /.devcontainer]
+    schedule: { interval: weekly }
+  - package-ecosystem: devcontainers
+    directory: /
+    schedule: { interval: weekly }

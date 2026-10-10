@@ -1,0 +1,127 @@
+# SPDX-FileCopyrightText: 2026 Happy Cynic Software LLC
+# SPDX-License-Identifier: Apache-2.0
+
+# Actions are pinned to commit SHAs (version in the comment); Dependabot keeps them current.
+name: image
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+
+permissions:
+  contents: read
+
+# The image is ghcr.io/<repository owner, lowercased>/pv-icloud, so a fork or a private copy
+# publishes to its own namespace (e.g. ghcr.io/happycynic/pv-icloud for HappyCynic/pv-icloud).
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - run: uv python install 3.14
+      - run: uv sync --frozen
+      - run: uv run ruff check src tests && uv run ruff format --check src tests
+      - run: uv run mypy
+      - run: uv run pytest
+
+  image:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+      id-token: write # build provenance attestation
+      attestations: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/pv-icloud" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        if: github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.IMAGE }}
+          # The org.opencontainers.image.source label (set by default) links the package
+          # to this repo, so it shows on the repo page and the release link resolves.
+          tags: |
+            type=sha
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          # SBOM and full build provenance attached to the image in the registry.
+          sbom: true
+          provenance: mode=max
+      # GitHub attestation, so users can check an image came from this repo's CI:
+      #   gh attestation verify oci://ghcr.io/happycynic/pv-icloud:<tag> -R HappyCynic/pv-icloud
+      # Attestations need a public repository (or GitHub Enterprise), so private copies skip it.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: github.event_name != 'pull_request' && !github.event.repository.private
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Image name
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/pv-icloud" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check tag matches pyproject version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match pyproject version $version"
+            exit 1
+          fi
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DIGEST: ${{ needs.image.outputs.digest }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          package_url="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/pkgs/container/${IMAGE##*/}"
+          cat > notes.md <<EOF
+          ## Container image
+
+          **Package:** [${IMAGE}:${version}](${package_url})
+
+          Pin by digest (in your \`compose.yml\`):
+
+          \`\`\`
+          ${IMAGE}@${DIGEST}
+          \`\`\`
+
+          \`\`\`
+          docker pull ${IMAGE}:${version}
+          \`\`\`
+
+          Platforms: linux/amd64, linux/arm64.
+          EOF
+          prerelease=()
+          [[ "$GITHUB_REF_NAME" == *-* ]] && prerelease=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" --title "pv-icloud $version" \
+            --notes-file notes.md --generate-notes --verify-tag "${prerelease[@]}"

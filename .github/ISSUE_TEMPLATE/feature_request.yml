@@ -1,0 +1,18 @@
+name: Feature request
+description: Suggest a change or a new tool.
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What you are trying to do
+      description: The task or question you want an MCP client to handle, and what gets in the way today.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: Suggested change
+      description: |
+        Optional. Note that the server is read-only by design: changes that send, move,
+        delete or edit iCloud data need a design discussion first.

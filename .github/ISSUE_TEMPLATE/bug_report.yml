@@ -1,0 +1,35 @@
+name: Bug report
+description: Something does not work as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security problems:** do not file them here. Use the Security tab → *Report a vulnerability*.
+
+        Please remove personal data (addresses, message text, tokens, feed URLs) from anything you paste.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      description: Tool name and arguments, or the steps that trigger it.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: Image tag or digest, or `pv-icloud` version.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant lines from `docker logs`, with personal data removed.
+      render: text

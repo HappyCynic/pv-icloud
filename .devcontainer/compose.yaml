@@ -1,0 +1,32 @@
+# Dev container service; devcontainer.json points here. Personal additions (extra mounts,
+# a host SSH agent) go in compose.local.yaml, which is gitignored and created on first start
+# from compose.local.example.yaml.
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: sleep infinity
+    # iCloud credentials for live runs; gitignored, created from devcontainer.env.example.
+    env_file: devcontainer.env
+    environment:
+      PV_ICLOUD_CONFIG: /workspaces/pv-icloud/config/pv-icloud.yaml
+      PV_ICLOUD_DATA_DIR: /data
+      PV_ICLOUD_PORT: "8771"
+    volumes:
+      - ..:/workspaces/pv-icloud:cached
+      # Kept off the bind mount: Linux wheels must not land in the host's .venv, and
+      # bind-mount I/O is slow on macOS.
+      - pv-icloud-venv:/home/vscode/.venv
+      - pv-icloud-uv-cache:/home/vscode/.cache/uv
+      - pv-icloud-claude:/home/vscode/.claude
+      # Per-account SQLite mail indexes. Holds mail bodies: keep it in a volume,
+      # never in the workspace bind mount.
+      - pv-icloud-data:/data
+
+# Fixed names so the volumes survive changes to the Compose project name.
+volumes:
+  pv-icloud-venv: { name: pv-icloud-venv }
+  pv-icloud-uv-cache: { name: pv-icloud-uv-cache }
+  pv-icloud-claude: { name: pv-icloud-claude }
+  pv-icloud-data: { name: pv-icloud-data }
