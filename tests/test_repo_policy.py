@@ -3,6 +3,8 @@
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
 import pytest
@@ -32,6 +34,9 @@ def _codeowners() -> dict[str, list[str]]:
         "/SECURITY.md",
         "/src/pv_icloud/dav.py",
         "/src/pv_icloud/mail/imap.py",
+        "/CLAUDE.md",
+        "/.claude/",
+        "/openspec/config.yaml",
     ],
 )
 def test_codeowners_lists_sensitive_paths(pattern: str) -> None:
@@ -54,3 +59,51 @@ def test_claude_md_states_checks() -> None:
         "uv run mypy",
     ):
         assert command in text, command
+
+
+def _claude_md() -> str:
+    return (ROOT / "CLAUDE.md").read_text()
+
+
+def _openspec_pin() -> str:
+    match = re.search(r"@fission-ai/openspec@(\d+\.\d+\.\d+)", _claude_md())
+    assert match, "CLAUDE.md must pin the OpenSpec version"
+    return match.group(1)
+
+
+def test_claude_md_describes_the_issue_workflow() -> None:
+    text = _claude_md()
+    for phrase in ("agent:propose", "agent:implement", "draft", "Never** merge, approve"):
+        assert phrase in text, phrase
+    # Tests for code changes; changelog only for what users notice (as in CONTRIBUTING.md).
+    assert "Every code change includes tests" in text
+    assert "Anything a user would notice" in text
+
+
+def test_generated_openspec_files_match_the_pinned_version() -> None:
+    pin = _openspec_pin()
+    generated = sorted((ROOT / ".claude").glob("skills/openspec-*/SKILL.md"))
+    generated += sorted((ROOT / ".claude" / "commands" / "opsx").glob("*.md"))
+    assert generated, "openspec init output is missing"
+    for path in generated:
+        text = path.read_text()
+        versions = set(re.findall(r'generatedBy: "([^"]+)"', text))
+        assert versions <= {pin}, (path, versions)
+        # Generated workflows may only pre-approve the openspec CLI, nothing broader.
+        tools = re.findall(r"^allowed-tools: (.+)$", text, re.M)
+        assert set(tools) <= {"Bash(openspec:*)"}, (path, tools)
+
+
+def test_openspec_config_has_context_and_spdx() -> None:
+    text = (ROOT / "openspec" / "config.yaml").read_text()
+    assert "SPDX-License-Identifier: Apache-2.0" in text
+    assert "schema: spec-driven" in text
+    assert "\ncontext: |" in text and "CLAUDE.md" in text
+
+
+def test_session_start_hook_only_syncs_dependencies() -> None:
+    settings = json.loads((ROOT / ".claude" / "settings.json").read_text())
+    assert set(settings) == {"hooks"} and set(settings["hooks"]) == {"SessionStart"}
+    commands = [h["command"] for g in settings["hooks"]["SessionStart"] for h in g["hooks"]]
+    assert commands and all("uv sync --frozen --all-groups" in c for c in commands)
+    assert all(c.rstrip().endswith("exit 0") for c in commands)

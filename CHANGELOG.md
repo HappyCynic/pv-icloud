@@ -11,6 +11,9 @@ each version.
 
 - `CLAUDE.md` with the rules AI agents must follow in this repository, and
   `.github/CODEOWNERS` requiring maintainer review.
+- Spec-driven development with [OpenSpec](https://github.com/Fission-AI/OpenSpec) 1.13.2
+  (`openspec/`, Claude Code commands and skills in `.claude/`), and an issue workflow for
+  agents: `agent:propose` produces a reviewed proposal, `agent:implement` builds it.
 
 ## [0.1.0] - 2026-10-10
 
