@@ -3,9 +3,10 @@
 
 """Read-only IMAP client over imaplib, plus a small per-account connection pool.
 
-Only read-only commands are ever issued: LIST, STATUS, EXAMINE, UID SEARCH, UID FETCH with
-BODY.PEEK, NOOP, IDLE. There is deliberately no select(readonly=False), STORE, COPY, MOVE,
-EXPUNGE or APPEND anywhere in this module.
+Only read-only commands are ever issued: CAPABILITY (sent by imaplib on connect), LOGIN,
+ENABLE, LIST, STATUS, EXAMINE, UID SEARCH, UID FETCH with BODY.PEEK, NOOP, IDLE, LOGOUT.
+There is deliberately no select(readonly=False), STORE, COPY, MOVE, EXPUNGE or APPEND anywhere
+in this module.
 """
 
 from __future__ import annotations
