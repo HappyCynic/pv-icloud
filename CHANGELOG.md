@@ -7,6 +7,11 @@ each version.
 
 ## [Unreleased]
 
+### Added
+
+- `CLAUDE.md` with the rules AI agents must follow in this repository, and
+  `.github/CODEOWNERS` requiring maintainer review.
+
 ## [0.1.0] - 2026-10-10
 
 ### Added

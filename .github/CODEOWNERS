@@ -1,0 +1,16 @@
+# SPDX-FileCopyrightText: 2026 Happy Cynic Software LLC
+# SPDX-License-Identifier: Apache-2.0
+
+# Everything needs review from the maintainer.
+*                         @mwklein
+
+# Listed explicitly so these stay owned even if the default above changes: CI and repository
+# settings, the container build, dependencies, the security policy, and the two modules that
+# keep the server read-only (DAV methods and IMAP commands).
+/.github/                 @mwklein
+/Dockerfile               @mwklein
+/pyproject.toml           @mwklein
+/uv.lock                  @mwklein
+/SECURITY.md              @mwklein
+/src/pv_icloud/dav.py     @mwklein
+/src/pv_icloud/mail/imap.py @mwklein
