@@ -20,7 +20,7 @@ jobs:
       contents: read
       issues: write
       id-token: write
-    uses: HappyCynic/.github/.github/workflows/agent-sdlc.yml@93fc9d6645aecc6857bbe41466b63bb08ee05b6d # main 2026-10-11
+    uses: HappyCynic/.github/.github/workflows/agent-sdlc.yml@79b6f519cb48860d0e8a8b1c153fa563fbc14889 # main 2026-10-11
     with:
       openspec_version: 1.13.2 # must match CLAUDE.md
       setup_uv: true
