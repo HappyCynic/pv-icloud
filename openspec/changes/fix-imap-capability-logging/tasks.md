@@ -11,7 +11,7 @@
 
 - [ ] 2.1 In `tests/test_mail.py`, update `test_reads_never_change_flags` so the allowed-command
       set includes `CAPABILITY` and the assertion checks the recorded commands are a subset of
-      exactly the set the `read-only-and-egress` spec's "Read-only IMAP commands" requirement
+      the set the `read-only-and-egress` spec's "Read-only IMAP commands" requirement
       allows (`CAPABILITY`, `LOGIN`, `ENABLE`, `LIST`, `STATUS`, `EXAMINE`, `UID`, `NOOP`, `IDLE`,
       `LOGOUT`), rather than only subtracting a hard-coded allow-list. Verify by running
       `uv run pytest tests/test_mail.py -k test_reads_never_change_flags` and confirming it fails
@@ -25,11 +25,8 @@
 
 - [ ] 3.1 Add `CAPABILITY` to the list of allowed commands in the module docstring of
       `src/pv_icloud/mail/imap.py`, matching the `read-only-and-egress` spec and the fixed fake.
-      Verify by re-reading the docstring against the spec's requirement text.
-- [ ] 3.2 Add an `Unreleased` entry to `CHANGELOG.md` noting the test fixture fix (the fake IMAP
-      server now records every command, including `CAPABILITY`, closing a gap where a forbidden
-      command could have gone undetected). Verify by checking the entry renders under `##
-      [Unreleased]`.
+      Verify by re-reading the docstring against the spec's requirement text. This change is
+      test- and docstring-only, so no user would notice it and it gets no `CHANGELOG.md` entry.
 
 ## 4. Final checks
 

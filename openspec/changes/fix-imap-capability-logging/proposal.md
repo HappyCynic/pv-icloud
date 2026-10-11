@@ -16,8 +16,8 @@ on connect — the check passes whether or not the real client ever sends someth
   (mirroring `imaplib`'s real connect-time behaviour), so the fake's command log reflects every
   command a real server would see.
 - `tests/test_mail.py`: `test_reads_never_change_flags` (and any other place that filters
-  `server.commands` against an allow-list) is tightened to assert the recorded commands are
-  exactly the set the `read-only-and-egress` spec allows, including `CAPABILITY`.
+  `server.commands` against an allow-list) is tightened to assert the recorded commands are a
+  subset of the set the `read-only-and-egress` spec allows, which includes `CAPABILITY`.
 - `src/pv_icloud/mail/imap.py`: the module docstring's list of allowed commands gains
   `CAPABILITY`, matching what the spec already states and what `imaplib` actually sends.
 - No change to server behaviour: the IMAP client already only ever issues the commands the spec
