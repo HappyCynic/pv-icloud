@@ -26,10 +26,11 @@ jobs:
       issues: write # clear the trigger label afterwards
       id-token: write # Claude GitHub App token exchange
     steps:
-      - uses: HappyCynic/.github/actions/agent-sdlc@ecfa44c65f2f13312c46c823a0f6bf1f1a924e7d # main 2026-10-11
+      - uses: HappyCynic/.github/actions/agent-sdlc@88e6adbd1a21ae31afbe6f838c4750d24f1c9b08 # main 2026-10-11
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           openspec_version: 1.13.2 # must match CLAUDE.md
           setup_uv: true
           setup: uv python install 3.14 && uv sync --frozen --all-groups
           allowed_tools: Bash(uv:*)
+          model: claude-opus-5-5 # both stages
