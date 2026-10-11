@@ -151,6 +151,7 @@ class FakeConn:
         self.enabled: set[str] = set()
         self._responses: dict[str, list[bytes]] = {}
         self.idle_events: list[tuple[str, list]] = []
+        self._log("CAPABILITY")  # imaplib sends it on connect to fill .capabilities
 
     def _log(self, *cmd):
         with self.s.lock:

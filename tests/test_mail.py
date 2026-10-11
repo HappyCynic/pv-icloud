@@ -16,9 +16,14 @@ from pv_icloud.mail.parse import parse_message
 from pv_icloud.mail.service import ToolInputError
 
 from .conftest import Harness, make_config
-from .fakeimap import make_message
+from .fakeimap import FakeServer, make_message
 
 NOW = dt.datetime.now(dt.UTC)
+
+# The read-only-and-egress spec's "Read-only IMAP commands" requirement.
+ALLOWED_IMAP_COMMANDS = frozenset(
+    {"CAPABILITY", "LOGIN", "ENABLE", "LIST", "STATUS", "EXAMINE", "UID", "NOOP", "IDLE", "LOGOUT"}
+)
 
 
 def deliver(server, folder, days_ago=1, **kw):
@@ -351,19 +356,15 @@ class TestTools:
             populated.service.thread(mid)
             populated.service.search(query="report", folders=["INBOX"])
         assert server.all_flags() == before
-        forbidden = {c[0] for c in server.commands} - {
-            "LOGIN",
-            "ENABLE",
-            "LOGOUT",
-            "NOOP",
-            "LIST",
-            "STATUS",
-            "EXAMINE",
-            "UID",
-            "IDLE",
-        }
-        assert not forbidden
+        assert ("CAPABILITY",) in server.commands  # the log covers connect, too
+        assert {c[0] for c in server.commands} <= ALLOWED_IMAP_COMMANDS
         assert {c[1] for c in server.commands if c[0] == "UID"} <= {"SEARCH", "FETCH"}
+
+
+def test_fake_records_capability_on_connect():
+    server = FakeServer()
+    server.connect()
+    assert server.commands == [("CAPABILITY",)]
 
 
 def test_cross_folder_search_latency(tmp_path, server):
