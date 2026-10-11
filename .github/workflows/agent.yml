@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: 2026 Happy Cynic Software LLC
+# SPDX-License-Identifier: Apache-2.0
+
+# Issue-driven agent pipeline: a maintainer adds agent:propose or agent:implement to an issue
+# and Claude does that stage (see CLAUDE.md, "Issue workflow"). The process lives in
+# HappyCynic/.github (docs/agent-pipeline.md); this file only triggers it. The Claude token
+# comes from the `agent` environment, which only `main` may use.
+name: agent
+
+on:
+  issues:
+    types: [labeled]
+
+permissions: {}
+
+jobs:
+  sdlc:
+    if: startsWith(github.event.label.name, 'agent:')
+    permissions:
+      contents: read
+      issues: write
+      id-token: write
+    uses: HappyCynic/.github/.github/workflows/agent-sdlc.yml@93fc9d6645aecc6857bbe41466b63bb08ee05b6d # main 2026-10-11
+    with:
+      openspec_version: 1.13.2 # must match CLAUDE.md
+      setup_uv: true
+      setup: uv python install 3.14 && uv sync --frozen --all-groups
+      allowed_tools: Bash(uv:*)
