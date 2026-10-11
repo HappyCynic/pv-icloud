@@ -18,8 +18,9 @@ contacts, and no code path SHALL do so on a tool's behalf.
 - **THEN** every message's flags, including `\Seen`, are exactly as before
 
 ### Requirement: Read-only IMAP commands
-The IMAP client SHALL send only `LOGIN`, `ENABLE`, `LIST`, `STATUS`, `EXAMINE`, `UID SEARCH`,
-`UID FETCH`, `NOOP`, `IDLE` and `LOGOUT`. Folders SHALL be opened only with `EXAMINE`, and
+The IMAP client SHALL send only `CAPABILITY` (which `imaplib` sends on connect), `LOGIN`,
+`ENABLE`, `LIST`, `STATUS`, `EXAMINE`, `UID SEARCH`, `UID FETCH`, `NOOP`, `IDLE` and `LOGOUT`.
+Folders SHALL be opened only with `EXAMINE`, and
 message content SHALL be fetched only with `BODY.PEEK[]`, so read state never changes. The client
 MUST NOT send `SELECT`, `STORE`, `COPY`, `MOVE`, `EXPUNGE`, `APPEND` or any other command that can
 change mail or read state.
