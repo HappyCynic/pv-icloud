@@ -177,6 +177,31 @@ their length.
 every account's mail sync has failed). With a valid bearer token it adds the caller's own
 account's sync state.
 
+## Limits and edge cases
+
+Behaviour that is easy to miss when reading results:
+
+- **Date ranges.** A date-only `start` means that day's midnight and a date-only `end` means
+  the end of that day (inclusive); datetimes are exclusive at the end. Values without a zone
+  use the account's default zone (`calendar.timezone`, else the zone of its iCloud
+  calendars).
+- **Recurrence in subscribed feeds.** Sub-hourly rules (`SECONDLY`, `MINUTELY`) yield only
+  their first occurrence, and `RANGE=THISANDFUTURE` overrides are applied to a single
+  occurrence. iCloud calendars are unaffected: iCloud expands those itself.
+- **Bounds.** Thread discovery stops at 1,000 messages; `find_person` examines the newest
+  2,000 matching messages per call, so its counts are lower bounds for very busy addresses.
+- **Paging.** Offsets index a fresh result set on every call, so mail that arrives between
+  two pages can shift results by one.
+- **Folder counts** in `mail_folders` come from the index and can be up to one sync pass
+  (5 minutes) old; `count_source` and `counts_as_of` say so. Before the first sync they are
+  read live.
+- **Throttling.** `Retry-After` is honoured as seconds or as an HTTP date; without one the
+  pause is 60 s, and no pause is longer than an hour. The account's DAV home URL is
+  rediscovered only after a client error (4xx other than 429), never after throttling,
+  server errors or network failures, which rediscovery would not fix.
+- **No deep links.** iCloud Mail has no per-message URLs; `web_url` opens the mailbox, and
+  the result says so.
+
 ## Deployment
 
 A two-stage image on `python:3.14-slim`, built for amd64 and arm64, runs as uid 10001 with a
