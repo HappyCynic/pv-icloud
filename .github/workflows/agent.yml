@@ -3,8 +3,7 @@
 
 # Issue-driven agent pipeline: a maintainer adds agent:propose or agent:implement to an issue
 # and Claude does that stage (see CLAUDE.md, "Issue workflow"). The process lives in
-# HappyCynic/.github (docs/agent-pipeline.md); this file only triggers it. The Claude token
-# comes from the `agent` environment, which only `main` may use.
+# HappyCynic/.github (actions/agent-sdlc, docs/agent-pipeline.md); this file only runs it.
 name: agent
 
 on:
@@ -14,15 +13,23 @@ on:
 permissions: {}
 
 jobs:
-  sdlc:
-    if: startsWith(github.event.label.name, 'agent:')
+  stage:
+    if: github.event.label.name == 'agent:propose' || github.event.label.name == 'agent:implement'
+    runs-on: ubuntu-latest
+    environment: agent # holds CLAUDE_CODE_OAUTH_TOKEN; only main may use it
+    timeout-minutes: 60
+    concurrency: # one stage per issue at a time
+      group: agent-${{ github.event.issue.number }}
+      cancel-in-progress: false
     permissions:
-      contents: read
-      issues: write
-      id-token: write
-    uses: HappyCynic/.github/.github/workflows/agent-sdlc.yml@79b6f519cb48860d0e8a8b1c153fa563fbc14889 # main 2026-10-11
-    with:
-      openspec_version: 1.13.2 # must match CLAUDE.md
-      setup_uv: true
-      setup: uv python install 3.14 && uv sync --frozen --all-groups
-      allowed_tools: Bash(uv:*)
+      contents: read # the agent pushes with the Claude app's token, not this one
+      issues: write # clear the trigger label afterwards
+      id-token: write # Claude GitHub App token exchange
+    steps:
+      - uses: HappyCynic/.github/actions/agent-sdlc@ecfa44c65f2f13312c46c823a0f6bf1f1a924e7d # main 2026-10-11
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          openspec_version: 1.13.2 # must match CLAUDE.md
+          setup_uv: true
+          setup: uv python install 3.14 && uv sync --frozen --all-groups
+          allowed_tools: Bash(uv:*)
