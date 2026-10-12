@@ -15,13 +15,32 @@ Only the latest release is supported.
 ## Threat model in short
 
 Private iCloud MCP gives an MCP client read access to one person's iCloud Mail, Calendar and
-Contacts. The design assumes the server runs on hardware the account owner controls and is
-reached over a private network.
+Contacts, and, only where the operator turns it on, limited write access to Mail. The design
+assumes the server runs on hardware the account owner controls and is reached over a private
+network.
 
-**Read-only by construction.** No tool sends, moves, deletes or flags mail, or changes events
-or contacts. The IMAP layer opens folders with `EXAMINE` and fetches with `BODY.PEEK`, so read
-state never changes; the CalDAV/CardDAV client can only send `PROPFIND` and `REPORT`. A bug
-that let a tool call change iCloud data is a vulnerability.
+**Read-only by default.** Unless mail writes are enabled (below), no tool sends, moves,
+deletes or flags mail. Calendar and Contacts are always read-only: the CalDAV/CardDAV client
+can only send `PROPFIND` and `REPORT`. The IMAP read path opens folders with `EXAMINE` and
+fetches with `BODY.PEEK`, so reading never changes read state. A way to change iCloud data
+without the switch and a grant described below is a vulnerability.
+
+**Optional mail write access** ([ADR-0004](docs/adr/0004-opt-in-mail-write.md); being
+implemented in stages). Writes need both the deployment switch `PV_ICLOUD_MAIL_WRITE=enabled`
+and a per-token grant (`move`, `archive`, `delete`, `draft`, `send`, each separately). Deletes
+only move mail to Deleted Messages, where it is recoverable until iCloud empties that folder;
+the server never permanently deletes. A message is removed from its source folder only after
+its copy in the destination is confirmed. Moves into or out of protected folders are refused,
+and each token has a write rate limit (default 30 per hour). These are vulnerabilities: any
+write without the switch and the matching grant; any permanent deletion; any change to a
+protected folder; a send to an address outside the token's `send_to` list; any IMAP write
+command other than those ADR-0004 lists.
+
+Write access raises the stakes of prompt injection: untrusted mail could try to make a model
+move, delete, draft or send. The defences above lower that risk but cannot remove it, and a
+sent message cannot be recalled. Grant only the actions a client needs; prefer `draft` over
+`send`; give `send` a `send_to` allowlist, or grant it only to clients that confirm each send
+with a person.
 
 **Authentication and isolation.** Every `/mcp` request needs a bearer token; the config
 holds only SHA-256 hashes, compared in constant time. Each token belongs to exactly one
@@ -52,7 +71,8 @@ redacted to their length. Message content, credentials and subscribed-calendar f
 never logged.
 
 **Outbound requests.** The server connects to iCloud (`imap.mail.me.com`,
-`caldav.icloud.com`, `contacts.icloud.com` and their `pNN-` hosts). If an account turns on
+`caldav.icloud.com`, `contacts.icloud.com` and their `pNN-` hosts, plus `smtp.mail.me.com`
+only for tokens granted `send`). If an account turns on
 subscribed calendars (`calendar.subscriptions: true`; off in the example config), it also
 fetches each feed from its publisher: only http(s), only public addresses, with the
 connection made to the address that passed that check (so DNS rebinding cannot redirect it to
