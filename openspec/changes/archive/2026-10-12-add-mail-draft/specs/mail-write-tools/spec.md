@@ -120,7 +120,8 @@ reporting it.
 ### Requirement: Draft input limits
 `mail_draft` SHALL accept at most 50 addresses across `to`, `cc` and `bcc` together; each
 entry SHALL be exactly one valid address, bare (`local@domain`) or with a display name
-(`Name <local@domain>`), with no line breaks. `subject` SHALL be at most 998 characters with
+(`Name <local@domain>`), with no line breaks; the address itself SHALL be ASCII (a display
+name may be any text). `subject` SHALL be at most 998 characters with
 no line breaks. `body` SHALL be at most 100,000 characters. Input breaking a limit SHALL be a
 tool error that names the limit (for an address, the field and position, not the address),
 and nothing SHALL be saved. These checks SHALL run after the write rate limit and before any

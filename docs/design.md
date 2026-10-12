@@ -63,6 +63,7 @@ client and a CardDAV client with an in-memory contacts cache.
 | `mail_move` | *Opt-in write.* Moves one message to another in-scope folder |
 | `mail_archive` | *Opt-in write.* Moves one message to the archive folder |
 | `mail_delete` | *Opt-in write.* Moves one message to Deleted Messages (never a permanent delete) |
+| `mail_draft` | *Opt-in write.* Saves one plain-text draft in Drafts, optionally as a reply; never sends |
 
 The write tools exist only with `PV_ICLOUD_MAIL_WRITE=enabled` and are listed only to tokens
 granted them; see [Mail writes](#mail-writes).
@@ -125,7 +126,7 @@ changes:
 1. **Deployment switch.** `PV_ICLOUD_MAIL_WRITE=enabled`. Without it `mail/imap_write.py` is
    never imported, no write tool is registered, and a token with `mail_write` is a config
    error. Any value other than `enabled`, `disabled` or empty is a config error too.
-2. **Per-token grant.** `mail_write: [move, archive, delete]`, each action on its own. The
+2. **Per-token grant.** `mail_write: [move, archive, delete, draft]`, each action on its own. The
    server lists each token only its granted write tools (SDK middleware filters `tools/list`)
    and refuses the others exactly as it refuses a tool that does not exist. A token with
    write actions gets server instructions naming them; a token without gets the read-only
@@ -155,10 +156,33 @@ leaves a duplicate (or a source copy marked `\Deleted`), never a loss, and the t
 says which. The copy keeps every flag, and `new_id` comes from `COPYUID`. Afterwards the
 old id is dropped from the index and the sync worker resyncs both folders at once.
 
+**Drafts.** `mail_draft` creates one new message and changes no existing one. Its input is
+checked first (at most 50 addresses across `to`, `cc` and `bcc`, each exactly one ASCII
+address; subject at most 998 characters with no line breaks; body at most 100,000
+characters; not entirely empty), then:
+
+1. With `in_reply_to`, the original is read like `mail_get` (`EXAMINE`, `BODY.PEEK[]`, same
+   scope and staleness checks), so its `\Seen` flag never changes. The draft gets
+   `In-Reply-To` (the original's `Message-ID`), `References` (the original's `References`,
+   else its `In-Reply-To`, then its `Message-ID`) and, without a caller subject, `Re: ` + the
+   original's subject unless it already starts with `Re:`.
+2. `mail/compose.py` builds a plain-text UTF-8 message: `From` from `mail.write.send_from`
+   when set, `To`, `Cc`, `Bcc`, `Subject`, `Date`, and a `Message-ID` on the fixed domain
+   `pv-icloud.invalid` (never this host's name).
+3. On a fresh write connection: no `UIDPLUS` (needed for `APPENDUID`) fails before anything
+   is sent; `LIST` finds the folder named `Drafts` (iCloud gives it no special-use
+   attribute), even when hidden from reads; `APPEND "Drafts" (\Draft \Seen)` saves it. No
+   `SELECT`. The new id comes from `APPENDUID`; if iCloud saved the draft without one, the
+   call still succeeds with `id: null`, so a caller has no reason to retry into a duplicate.
+4. If Drafts is in the read scope, the sync worker resyncs it.
+
+There is no SMTP code: nothing is sent, and a person sends the draft from Mail. Protected
+folders fence moves only; the `draft` grant is what controls drafting.
+
 `tests/test_repo_policy.py` inspects the code's IMAP call sites: only `mail/imap_write.py`
-may `SELECT`, and only with these single-UID forms; nothing may `STORE`, `COPY`, `EXPUNGE`,
-`CLOSE`, `MOVE`, `APPEND` or touch folders. The fake IMAP server rejects every other form
-at run time.
+may `SELECT`, and only with these single-UID forms, and `APPEND` only with exactly
+`(\Draft \Seen)`; nothing may `STORE`, `COPY`, `EXPUNGE`, `CLOSE`, `MOVE` or touch folders.
+The fake IMAP server rejects every other form at run time.
 
 ## Calendar
 

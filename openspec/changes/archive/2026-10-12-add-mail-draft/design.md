@@ -84,8 +84,9 @@ error naming the limit and changing nothing:
   bcc`.
 - Each entry is exactly one address, `local@domain` or `Display Name <local@domain>`, parsed
   with the standard library (`email.headerregistry`). Refused: empty strings, more than one
-  address in an entry (commas, groups), no `@` or empty local part or domain, and any CR or
-  LF. The error names the field and position (`to[2] is not a single valid address`), not the
+  address in an entry (commas, groups), no `@` or empty local part or domain, any CR or
+  LF, and a non-ASCII local part or domain (a plain RFC 5322 header cannot carry one; display
+  names may be any text). The error names the field and position (`to[2] is not a single valid address`), not the
   value.
 - `subject` at most 998 characters, with no CR or LF: `subject must be at most 998
   characters with no line breaks`. (998 is RFC 5322's line limit; the email library folds the
