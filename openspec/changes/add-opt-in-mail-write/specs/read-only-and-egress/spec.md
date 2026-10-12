@@ -7,8 +7,9 @@ No read tool (`mail_folders`, `mail_search`, `mail_get`, `mail_thread`, the cale
 the contacts tools and `find_person`) SHALL send, move, delete or flag mail, create or change
 events, or create or change contacts, and no code path SHALL do so on a read tool's behalf.
 Only the mail write tools SHALL change mail, and only in the ways the `mail-write-tools`
-capability allows. No tool SHALL create or change events or contacts, set or clear any
-message flag on an existing message, or permanently remove mail.
+capability allows. No tool SHALL create or change events or contacts, set or clear any flag
+on an existing message other than the `\Deleted` step of a guarded move, or remove a message
+from a folder without a confirmed copy elsewhere.
 
 #### Scenario: Repeated reads leave mail untouched
 - **WHEN** a caller runs `mail_search`, `mail_get` and `mail_thread` a hundred times over unread
@@ -27,7 +28,7 @@ Every IMAP connection used for reading (the sync worker and the read tools) SHAL
 for reading only with `EXAMINE`, and message content SHALL be fetched only with
 `BODY.PEEK[]`, so read state never changes. A reading connection MUST NOT send `SELECT`,
 `STORE`, `COPY`, `MOVE`, `EXPUNGE`, `APPEND` or any other command that can change mail or
-read state.
+read state, and a connection that has been used for writing SHALL never be used for reading.
 
 #### Scenario: Commands seen by the server
 - **WHEN** the sync worker and the read tools run against an IMAP server
@@ -69,9 +70,9 @@ server errors or network failures. HTTP 401 SHALL be reported as rejected creden
 Besides iCloud, the server SHALL connect only to the publishers of subscribed calendars, and
 only for accounts with `calendar.subscriptions: true`, under the rules of the
 subscribed-calendars capability (http or https, public addresses only, no credentials). It SHALL
-connect to `smtp.mail.me.com` only while running `mail_send` for a token granted `send`.
-Turning mail HTML into text SHALL never fetch anything, so remote images and tracking pixels
-are never loaded.
+connect to `smtp.mail.me.com` only while running `mail_send` for a token granted `send`, with
+`PV_ICLOUD_MAIL_WRITE` enabled. Turning mail HTML into text SHALL never fetch anything, so
+remote images and tracking pixels are never loaded.
 
 #### Scenario: Subscriptions off
 - **WHEN** no account turns on `calendar.subscriptions` and no token has `send`
@@ -84,24 +85,29 @@ are never loaded.
 ## ADDED Requirements
 
 ### Requirement: Mail write IMAP commands
-Only the mail write tools SHALL change mail over IMAP, and they SHALL use only `SELECT`,
-`UID MOVE` and `APPEND` in addition to the read commands. `SELECT` SHALL be used only to move
-a message out of the selected folder, and a connection that has sent `SELECT` SHALL be logged
-out after the write, never reused for reading. `APPEND` SHALL be used only to save a new
-draft or a sent copy. The server MUST NOT send `STORE`, `COPY`, `EXPUNGE`, `UID EXPUNGE`,
-`UID STORE`, `UID COPY`, `CLOSE`, `CREATE`, `DELETE`, `RENAME`, `SUBSCRIBE` or `UNSUBSCRIBE`
-on any connection. When the server does not advertise `MOVE`, moving tools SHALL fail with a
-tool error and send no `SELECT`.
+Only the mail write tools SHALL change mail over IMAP, on connections used for nothing else.
+Besides the read commands, such a connection SHALL send only: `SELECT` of the source folder of
+a move; `UID COPY` of exactly one UID; `UID STORE` of exactly one UID with exactly
+`+FLAGS.SILENT (\Deleted)`, only after a `UID COPY` of that UID was confirmed by `COPYUID`;
+`UID EXPUNGE` of exactly that one UID; and `APPEND` of a new draft or sent copy. Such a
+connection SHALL be logged out after the write. The server MUST NOT send, on any connection,
+`STORE`, `COPY`, `EXPUNGE` without `UID`, `CLOSE`, `MOVE`, `UID MOVE`, a `UID COPY`,
+`UID STORE` or `UID EXPUNGE` with more than one UID or a range, `UID STORE` with any other
+flags or with `-FLAGS` or `FLAGS`, `CREATE`, `DELETE`, `RENAME`, `SUBSCRIBE` or
+`UNSUBSCRIBE`. Code that sends these write commands SHALL live only in
+`src/pv_icloud/mail/imap_write.py`, and that module SHALL NOT be imported when
+`PV_ICLOUD_MAIL_WRITE` is not `enabled`.
 
 #### Scenario: Commands seen during a move
-- **WHEN** a caller moves a message
-- **THEN** the IMAP server sees `SELECT` of the source folder and one `UID MOVE`, and no
-  `STORE`, `COPY` or `EXPUNGE`, and that connection then logs out
+- **WHEN** a caller moves the message with UID 7
+- **THEN** the IMAP server sees, on one connection, `SELECT` of the source, `UID COPY 7`,
+  `UID STORE 7 +FLAGS.SILENT (\Deleted)`, `UID EXPUNGE 7` and `LOGOUT`, and no `STORE`,
+  `COPY`, `EXPUNGE`, `CLOSE` or `MOVE`
 
-#### Scenario: Server without MOVE
-- **WHEN** the IMAP server does not advertise `MOVE` and a caller deletes a message
-- **THEN** the call fails with a tool error, and the server sees no `SELECT`, `COPY`, `STORE`
-  or `EXPUNGE`
+#### Scenario: Write switch off
+- **WHEN** the server runs without `PV_ICLOUD_MAIL_WRITE=enabled`
+- **THEN** `pv_icloud.mail.imap_write` and `pv_icloud.mail.smtp` are not imported and no
+  write tool is registered
 
 ### Requirement: Calendar and Contacts stay read-only
 Granting any mail write action SHALL NOT change what the CalDAV and CardDAV clients may send;
