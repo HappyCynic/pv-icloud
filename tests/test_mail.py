@@ -587,6 +587,151 @@ class TestWrites:
         assert self.no_write_sent(server)
 
 
+class TestDrafts:
+    """mail_draft at the service layer (add-mail-draft)."""
+
+    @pytest.fixture(autouse=True)
+    def no_smtp(self, monkeypatch):
+        import smtplib
+
+        def refuse(*args, **kwargs):
+            raise AssertionError("mail_draft must never open an SMTP connection")
+
+        monkeypatch.setattr(smtplib, "SMTP", refuse)
+        monkeypatch.setattr(smtplib, "SMTP_SSL", refuse)
+
+    @pytest.fixture
+    def make(self, server, tmp_path):
+        def make(**config) -> Harness:
+            account = make_config(tmp_path, **config).account("alice")
+            h = Harness(server, account, tmp_path, write=True)
+            h.run_sync()
+            server.commands.clear()
+            return h
+
+        return make
+
+    @pytest.fixture
+    def h(self, make):
+        return make()
+
+    @staticmethod
+    def drafts(server):
+        return list(server.folders["Drafts"].messages.values())
+
+    def test_saves_one_draft(self, server, h):
+        before = server.all_flags()
+        out = h.service.draft(to=["Bob <bob@example.com>"], subject="Lunch", body="Noon?")
+        [draft] = self.drafts(server)
+        assert draft.flags == {"\\Draft", "\\Seen"}
+        p = parse_message(draft.raw)
+        assert (p.to, p.subject, p.body.strip(), p.from_) == (
+            "Bob <bob@example.com>", "Lunch", "Noon?", ""
+        )  # fmt: skip
+        assert out == {
+            "saved": True,
+            "folder": "Drafts",
+            "id": MailId("Drafts", 1, draft.uid).encode(),
+            "in_reply_to": None,
+        }
+        assert {k: v for k, v in server.all_flags().items() if k[0] != "Drafts"} == before
+
+    def test_from_is_the_accounts_send_from(self, server, make):
+        h = make(default_write={"send_from": "me@example.com"})
+        h.service.draft(subject="x")
+        [draft] = self.drafts(server)
+        assert parse_message(draft.raw).from_ == "me@example.com"
+
+    def test_protected_drafts_does_not_block(self, server, make):
+        # Protected folders fence moves only; the draft grant is the control (PR #19).
+        h = make(
+            default_write={"protected_folders": ["Drafts"]},
+            alice_write={"protected_folders": ["Drafts", "INBOX"]},
+        )
+        uid = deliver(server, "INBOX", message_id="<p@x>")
+        out = h.service.draft(subject="x", in_reply_to=MailId("INBOX", 1, uid).encode())
+        assert out["saved"] is True and len(self.drafts(server)) == 1
+
+    @pytest.mark.parametrize(
+        "kw",
+        [
+            {},
+            {"to": ["not an address"]},
+            {"to": [f"a{i}@example.com" for i in range(51)]},
+            {"subject": "a\r\nBcc: x@example.com"},
+            {"body": "b" * 100_001},
+        ],
+    )
+    def test_bad_input_sends_no_imap_command(self, server, h, kw):
+        with pytest.raises(ToolInputError):
+            h.service.draft(**kw)
+        assert server.commands == [] and not self.drafts(server)
+
+    def test_reply_keeps_the_original_unread(self, server, h):
+        uid = deliver(
+            server,
+            "INBOX",
+            subject="Plans",
+            message_id="<m2@x>",
+            in_reply_to="<m1@x>",
+            references=["<m1@x>"],
+        )
+        mid = MailId("INBOX", 1, uid).encode()
+        out = h.service.draft(to=["alice@example.com"], body="Sounds good", in_reply_to=mid)
+        assert server.folders["INBOX"].messages[uid].flags == set()  # still unread
+        reads = [c for c in server.commands if c[0] in ("EXAMINE", "SELECT", "UID")]
+        assert [c[0] for c in reads] == ["EXAMINE", "UID"]
+        assert reads[1][1] == "FETCH" and "BODY.PEEK[]" in reads[1][3]
+        [draft] = self.drafts(server)
+        p = parse_message(draft.raw)
+        assert (p.in_reply_to, p.references, p.subject) == (
+            "<m2@x>", ["<m1@x>", "<m2@x>"], "Re: Plans"
+        )  # fmt: skip
+        assert p.to == "alice@example.com"  # recipients are never filled in from the original
+        assert out["in_reply_to"] == mid
+
+    def test_reply_alone_is_enough(self, server, h):
+        uid = deliver(server, "INBOX", subject="Plans", message_id="<m2@x>")
+        h.service.draft(in_reply_to=MailId("INBOX", 1, uid).encode())
+        [draft] = self.drafts(server)
+        p = parse_message(draft.raw)
+        assert (p.subject, p.to) == ("Re: Plans", "")
+
+    def test_bad_reply_ids_save_nothing(self, server, h):
+        uid = deliver(server, "INBOX")
+        junk = deliver(server, "Junk")  # hidden from the read scope by default
+        for bad, message in (
+            ("%%%", "malformed"),
+            (MailId("Junk", 1, junk).encode(), "unknown folder: Junk"),
+            (MailId("INBOX", 7, uid).encode(), "stale"),
+            (MailId("INBOX", 1, 999).encode(), "not found"),
+        ):
+            with pytest.raises(ToolInputError, match=message):
+                h.service.draft(subject="x", in_reply_to=bad)
+        assert not self.drafts(server)
+        assert "APPEND" not in [c[0] for c in server.commands]
+
+    def test_resync_only_when_drafts_is_in_the_read_scope(self, server, make, monkeypatch):
+        for special, expected in (({}, []), ({"drafts": True}, [("Drafts",)])):
+            h = make(alice_special=special)
+            asked: list = []
+            monkeypatch.setattr(h.sync, "request_resync", lambda *names, a=asked: a.append(names))
+            h.service.draft(subject="x")
+            assert asked == expected
+
+    def test_draft_readable_when_drafts_is_in_scope(self, server, make):
+        h = make(alice_special={"drafts": True})
+        out = h.service.draft(subject="Lunch", body="Noon?")
+        got = h.service.get(out["id"])
+        assert got["headers"]["subject"] == "Lunch"
+        assert server.folders["Drafts"].messages[got["uid"]].flags == {"\\Draft", "\\Seen"}
+
+    def test_without_a_writer_nothing_is_written(self, server, harness):
+        with pytest.raises(ToolInputError, match="not enabled"):
+            harness.service.draft(subject="x")
+        assert not self.drafts(server)
+
+
 def test_sync_resyncs_requested_folders(server, harness):
     uid = deliver(server, "INBOX", subject="moving")
     harness.run_sync()

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from ..config import AccountConfig
 from ..errors import ToolInputError
+from .compose import Original, build_draft, check_draft
 from .ids import BadMailId, MailId, decode_id
 from .imap import ImapPool
 from .index import IndexedMessage, MailIndex
@@ -311,6 +312,47 @@ class MailService:
             return trash
 
         return self._move(mid, resolve)
+
+    def draft(
+        self,
+        *,
+        to: Sequence[str] = (),
+        cc: Sequence[str] = (),
+        bcc: Sequence[str] = (),
+        subject: str | None = None,
+        body: str = "",
+        in_reply_to: str | None = None,
+    ) -> dict:
+        """Save one plain-text draft in Drafts (even if hidden from reads). Never sends.
+
+        Protected folders do not apply: they fence moves, and the `draft` grant is the
+        control. A reply's original is read like mail_get (EXAMINE, BODY.PEEK), unchanged.
+        """
+        if self.writer is None:
+            raise ToolInputError("mail writes are not enabled")
+        check_draft(to=to, cc=cc, bcc=bcc, subject=subject, body=body, in_reply_to=in_reply_to)
+        reply = None
+        if in_reply_to:
+            p, _ = self._fetch_one(self._resolve(in_reply_to))
+            reply = Original(p.message_id, p.in_reply_to, p.references, p.subject)
+        message = build_draft(
+            to=to,
+            cc=cc,
+            bcc=bcc,
+            subject=subject,
+            body=body,
+            send_from=self.account.mail.write.send_from,
+            reply=reply,
+        )
+        saved = self.writer.append_draft(message)
+        if self.sync is not None and self.account.mail.folders.allows(saved.folder):
+            self.sync.request_resync(saved.folder)
+        return {
+            "saved": True,
+            "folder": saved.folder,
+            "id": saved.new_id.encode() if saved.new_id else None,
+            "in_reply_to": in_reply_to or None,
+        }
 
     def _write_source(
         self, mail_id: str, token_protected: Sequence[str]

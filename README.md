@@ -51,8 +51,16 @@ granted on its own; a token sees only the tools it was granted, and a token with
 | `mail_move` | `move` | Move one message to another in-scope folder |
 | `mail_archive` | `archive` | Move one message to the archive folder (`Archive`, found by name) |
 | `mail_delete` | `delete` | Move one message to `Deleted Messages`; it stays recoverable there until iCloud empties that folder. Nothing is ever deleted permanently. |
+| `mail_draft` | `draft` | Save one plain-text draft in `Drafts` (found by name, even when hidden from reads) for a person to review and send from their mail app. Nothing is ever sent. |
 
-- One message per call; the result has the message's `new_id`.
+- One message per call; a move's result has the message's `new_id`.
+- **Drafts:** optional `to`, `cc`, `bcc`, `subject`, `body` and `in_reply_to` (a message id,
+  which threads the draft as a reply and gives it a `Re:` subject; the original stays unread).
+  At most 50 addresses across `to`, `cc` and `bcc`, a subject of at most 998 characters with
+  no line breaks, and a body of at most 100,000 characters. The draft is saved with
+  `APPEND` flagged `\Draft \Seen`, and its `From` is `mail.write.send_from` when set (Mail
+  fills in the default sender otherwise). `draft` does not grant sending; protected folders
+  do not apply to drafts.
 - **Guarded move:** iCloud has no IMAP `MOVE`, so the message is copied (`UID COPY`), and
   only once the server confirms that copy (`COPYUID`) is the original marked `\Deleted` and
   expunged, by its UID alone. If a step fails, the error says where the message is; it is
@@ -174,6 +182,7 @@ See [`config/pv-icloud.example.yaml`](config/pv-icloud.example.yaml). Per accoun
 | `mail.max_connections` | `2` | IMAP connections (iCloud limits per Apple ID); one is reserved for sync |
 | `mail.write.protected_folders` | `[]` | No mail write moves messages into or out of these folders; an account's list adds to the defaults' |
 | `mail.write.archive_folder` | `Archive` | Where `mail_archive` moves messages |
+| `mail.write.send_from` | unset | `From` of drafts (one bare address, `local@domain`); unset: no `From`, and Mail fills in the default sender |
 | `calendar.calendars.include` / `exclude` | `"*"` / `[]` | Calendar scope (display names, globs allowed) |
 | `calendar.max_range_days` | `90` | Longest `calendar_events` range |
 | `calendar.max_search_days` | `730` | Longest `calendar_search` range |
@@ -186,7 +195,7 @@ Per token (under `accounts[].tokens[]`, besides `label` and `sha256`):
 
 | Key | Default | Meaning |
 |---|---|---|
-| `mail_write` | `[]` | Mail write actions this token may use: `move`, `archive`, `delete`. Needs `PV_ICLOUD_MAIL_WRITE=enabled`, otherwise startup fails |
+| `mail_write` | `[]` | Mail write actions this token may use: `move`, `archive`, `delete`, `draft`. Needs `PV_ICLOUD_MAIL_WRITE=enabled`, otherwise startup fails |
 | `protected_folders` | `[]` | Added to the account's protected folders for this token only |
 | `max_writes_per_hour` | `30` | This token's write limit (sliding hour, held in memory) |
 

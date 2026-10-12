@@ -28,6 +28,12 @@ each version.
   - Per-token write limit `max_writes_per_hour` (default 30), held in memory.
   - `mail.write.archive_folder` (default `Archive`).
   - Write calls are audited with `"write": true` and no folder names.
+  - `mail_draft`, granted with `mail_write: [draft]`: saves one plain-text draft in Drafts
+    (flagged `\Draft` and `\Seen`) for a person to review and send; nothing is ever sent.
+    Optional `in_reply_to` threads it as a reply without marking the original read. At most
+    50 addresses, a 998-character subject and a 100,000-character body. Audit lines carry no
+    addresses, subject or body.
+  - `mail.write.send_from` (optional): the `From` address of drafts.
 
 ## [0.1.0] - 2026-10-10
 

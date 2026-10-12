@@ -286,8 +286,8 @@ class TestMailWriteConfig:
         ("token", "parts"),
         [
             ({"mail_write": ["move", "expunge"]}, ["mail_write", "expunge", "move, archive"]),
-            ({"mail_write": ["draft"]}, ["mail_write", "draft"]),  # added by add-mail-draft
-            ({"mail_write": ["send"]}, ["mail_write", "send"]),  # added by add-mail-send
+            # send arrives with add-mail-send; until then it is unknown, listing the allowed.
+            ({"mail_write": ["draft", "send"]}, ["mail_write", "send", "delete, draft"]),
             ({"mail_write": "move"}, ["mail_write", "list"]),
             ({"mail_write": [1]}, ["mail_write"]),
             ({"protected_folders": "Work"}, ["protected_folders", "list"]),
@@ -303,10 +303,28 @@ class TestMailWriteConfig:
         for part in ["account x", "'agent'", *parts]:
             assert part in str(err.value)
 
+    def test_draft_grant(self, tmp_path):
+        [tok] = write_config(tmp_path, token={"mail_write": ["draft"]}).account("x").tokens
+        assert tok.mail_write == frozenset({"draft"})  # nothing else, and never send
+
+    def test_draft_grant_without_the_switch(self, tmp_path):
+        with pytest.raises(ConfigError, match="PV_ICLOUD_MAIL_WRITE"):
+            write_config(tmp_path, env={}, token={"mail_write": ["draft"]})
+
     def test_account_write_settings_default(self, tmp_path):
         write = write_config(tmp_path).account("x").mail.write
         assert write.protected_folders == ()
         assert write.archive_folder == "Archive"
+        assert write.send_from is None
+
+    def test_send_from(self, tmp_path):
+        defaults = {"write": {"send_from": "Team@Example.com"}}
+        cfg = write_config(tmp_path, defaults=defaults)
+        assert cfg.account("x").mail.write.send_from == "Team@Example.com"
+        cfg = write_config(tmp_path, defaults=defaults, mail={"write": {"send_from": "me@x.org"}})
+        assert cfg.account("x").mail.write.send_from == "me@x.org"
+        # Validated, with no effect, while the switch is off.
+        assert write_config(tmp_path, env={}, defaults=defaults).mail_write is False
 
     def test_protected_folders_add_to_the_defaults(self, tmp_path):
         cfg = write_config(
@@ -325,7 +343,15 @@ class TestMailWriteConfig:
     @pytest.mark.parametrize(
         ("write", "parts"),
         [
-            ({"send_from": "a@example.com"}, ["unknown key", "send_from"]),  # add-mail-send
+            ({"send_to": ["a@example.com"]}, ["unknown key", "send_to"]),  # add-mail-send
+            ({"send_from": "not-an-address"}, ["mail.write.send_from", "bare address"]),
+            ({"send_from": "Me <me@example.com>"}, ["mail.write.send_from"]),
+            ({"send_from": "a@example.com, b@example.com"}, ["mail.write.send_from"]),
+            ({"send_from": "a@b@example.com"}, ["mail.write.send_from"]),
+            ({"send_from": "@example.com"}, ["mail.write.send_from"]),
+            ({"send_from": "me@localhost"}, ["mail.write.send_from"]),
+            ({"send_from": ["me@example.com"]}, ["mail.write.send_from"]),
+            ({"send_from": ""}, ["mail.write.send_from"]),
             ({"protected_folders": "Taxes"}, ["protected_folders"]),
             ({"archive_folder": ""}, ["archive_folder"]),
             ({"archive_folder": ["Archive"]}, ["archive_folder"]),
