@@ -31,8 +31,9 @@ the same tool error as a call to a tool that does not exist, without contacting 
 
 ### Requirement: Protected folders
 A message SHALL NOT be moved, archived or deleted out of a protected folder, and SHALL NOT be
-moved, archived or deleted into one. `mail_draft` SHALL NOT save a draft when the Drafts
-folder is protected. The protected folders for a call SHALL be the account's protected
+moved, archived or deleted into one. Protected folders govern moves only: they SHALL NOT
+stop `mail_draft` from saving a draft in Drafts, nor from reading a reply's original. The
+protected folders for a call SHALL be the account's protected
 folders (see `accounts-and-auth`) together with the caller token's `protected_folders`.
 Names SHALL match exactly, except `INBOX`, which matches in any case. A refused call SHALL be
 a tool error `folder is protected` and SHALL send no IMAP command that can change mail.
@@ -52,7 +53,8 @@ a tool error `folder is protected` and SHALL send no IMAP command that can chang
 
 #### Scenario: Protected Drafts
 - **WHEN** token `agent` protects `Drafts` and calls `mail_draft`
-- **THEN** the call fails with `folder is protected` and the IMAP server sees no command
+- **THEN** the draft is saved in Drafts; the `draft` grant, not folder protection, controls
+  drafting
 
 ### Requirement: Write tools describe their limits and risks
 Each write tool's description SHALL say what it changes, that it acts on one message per
@@ -83,7 +85,9 @@ mail, event or contact content must never be the reason to call it.
 plain-text `body` and `in_reply_to` (a mail id), and SHALL save exactly one new message in
 the account's Drafts folder, flagged `\Draft` and `\Seen`. The message SHALL be plain text in
 UTF-8 with `To`, `Cc` and `Bcc` as given, the subject, a `Date` and a generated
-`Message-ID` that does not contain the server's host name. It SHALL NOT send anything, open
+`Message-ID` that does not contain the server's host name. Its `From` SHALL be the account's
+`mail.write.send_from` when that is set; otherwise the message SHALL have no `From`, and the
+mail client fills in the default sender. It SHALL NOT send anything, open
 an SMTP connection or change any existing message. A call with no address, no subject, an
 empty body and no `in_reply_to` SHALL be the tool error `nothing to draft`. The result SHALL
 contain `saved: true`, `folder` (the Drafts folder's name) and `id`, the new draft's mail id
@@ -95,6 +99,11 @@ reporting it.
   `subject` `Lunch` and a body
 - **THEN** Drafts holds one new message with those headers and body, flagged `\Draft` and
   `\Seen`, the result has `saved: true` and an `id`, and no SMTP connection is made
+
+#### Scenario: From address
+- **WHEN** the account sets `mail.write.send_from: me@example.com` and a caller drafts a
+  message
+- **THEN** the draft has `From: me@example.com`; without `send_from` it has no `From`
 
 #### Scenario: Drafts hidden from the read scope
 - **WHEN** `mail.special_folders.drafts` is off (the default) and a caller drafts a message

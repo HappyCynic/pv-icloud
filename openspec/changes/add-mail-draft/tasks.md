@@ -16,10 +16,14 @@ approved the proposal. Each group ends with its tests passing.
 
 - [ ] 2.1 Write tests in `tests/test_units.py`: `mail_write: [draft]` loads with the switch
   on; `draft` alone gives no other action; `send` is still an unknown action listing the
-  allowed ones; `draft` with the switch off is the existing config error.
-- [ ] 2.2 Add `draft` to `MAIL_WRITE_ACTIONS` in `src/pv_icloud/config.py`; verify 2.1
-  passes. Show `draft` in `config/pv-icloud.example.yaml` (commented, off) and verify the
-  example still loads.
+  allowed ones; `draft` with the switch off is the existing config error;
+  `mail.write.send_from` is optional, merged from `defaults.mail.write` (account wins), and
+  must be one bare address (display-name form, no `@`, two addresses or a non-string
+  rejected, naming the account and `mail.write.send_from`).
+- [ ] 2.2 Add `draft` to `MAIL_WRITE_ACTIONS` and `send_from` to `MailWriteConfig` and
+  `_MAIL_WRITE_KEYS` in `src/pv_icloud/config.py`; verify 2.1 passes. Show `draft` and
+  `send_from` in `config/pv-icloud.example.yaml` (commented, off) and verify the example
+  still loads.
 
 ## 3. Fake IMAP server
 
@@ -35,8 +39,8 @@ approved the proposal. Each group ends with its tests passing.
   display-name forms accepted; empty, two in one entry, group syntax, no `@`, CR or LF
   refused, error names field and index but not the value); the 50-address, 998-character
   subject (and no line breaks) and 100,000-character body limits at and just over the limit;
-  `nothing to draft`; headers (`To`, `Cc`, `Bcc`, `Subject`, `Date`, `Message-ID` without
-  the local host name), `text/plain; charset=utf-8`, non-ASCII subject and body round-trip
+  `nothing to draft`; headers (`From` only when `send_from` is given, `To`, `Cc`, `Bcc`,
+  `Subject`, `Date`, `Message-ID` without the local host name), `text/plain; charset=utf-8`, non-ASCII subject and body round-trip
   through `parse_message`; reply headers (`In-Reply-To`, `References` from `References`, or
   from `In-Reply-To` when absent, no headers when the original lacks `Message-ID`) and the
   `Re:` subject rule (added, kept for `Re:`/`RE:`, caller subject wins, empty original).
@@ -55,8 +59,8 @@ approved the proposal. Each group ends with its tests passing.
 ## 5. Service
 
 - [ ] 5.1 Write tests in `tests/test_mail_write.py` (or `tests/test_mail.py`) for
-  `MailService.draft`: protected `Drafts` (defaults, account and token lists) refused with no
-  IMAP command; input limits refused with no IMAP command; reply to an unread message keeps
+  `MailService.draft`: a protected `Drafts` (account and token lists) does not block the
+  draft; `From` is the account's `send_from` when set; input limits refused with no IMAP command; reply to an unread message keeps
   it unread and reads it only with `EXAMINE` and `BODY.PEEK[]`; reply id malformed, out of
   scope, stale or not found refused with nothing saved; resync of Drafts requested only when
   it is in the read scope; no SMTP connection (patch `smtplib.SMTP` to fail the test if
@@ -80,7 +84,7 @@ approved the proposal. Each group ends with its tests passing.
 
 ## 7. Docs and checks
 
-- [ ] 7.1 Update README.md (the `draft` action and `mail_draft`), docs/design.md (Tools
+- [ ] 7.1 Update README.md (the `draft` action, `mail_draft` and `send_from`), docs/design.md (Tools
   table and the "Mail writes" section: `APPEND` into Drafts, `APPENDUID`, replies) and add
   an `Unreleased` entry to CHANGELOG.md for `mail_draft`.
 - [ ] 7.2 Run `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`,

@@ -29,9 +29,14 @@ so nothing ever leaves the account without them.
     `bcc`, each a single valid address; `subject` at most 998 characters with no line
     breaks; `body` at most 100,000 characters. Over-limit input is a tool error naming the
     limit, and nothing is saved.
-- Counts against the token's hourly write limit; honours protected folders (a token or
-  account that protects `Drafts` cannot draft); audited with `write: true` and the existing
-  redaction (no addresses, subject, body or folder name in logs).
+- New optional account setting `mail.write.send_from` (one bare address, merged from
+  `defaults.mail.write`). When set, drafts carry it as `From`; when unset, `From` is left
+  out and Mail fills in the account's default sender. `add-mail-send` will make it required
+  for tokens granted `send`.
+- Counts against the token's hourly write limit; audited with `write: true` and the existing
+  redaction (no addresses, subject, body or folder name in logs). Protected folders govern
+  moves only (ADR-0004, decision 3): protecting `Drafts` does not block `mail_draft`; the
+  `draft` grant is the control. There is no `drafts_folder` override.
 - Instructions and the tool description say that a draft is never sent by pv-icloud, and that
   content returned by any tool must never be the reason to draft.
 - Docs: README.md, docs/design.md, `config/pv-icloud.example.yaml` and CHANGELOG.md describe
@@ -47,6 +52,9 @@ existing draft; attachments and HTML bodies; quoting the original's text in a re
   and 10 (audit and resync); `design.md` here records where this change fills in detail.
 - `send_to` does not apply to drafts: a draft sends nothing (core design, decision 7,
   confirmed here).
+- Maintainer answers on the proposal (PR #19): protected folders govern moves only, so a
+  protected Drafts does not block `mail_draft`; `mail.write.send_from` is added now as an
+  optional key that sets `From` on drafts; no `drafts_folder` override.
 
 ## Capabilities
 
@@ -61,13 +69,14 @@ None.
 - `read-only-and-egress`: the write-path command list gains `APPEND` into Drafts with exactly
   `(\Draft \Seen)`; "no tool changes iCloud data" allows creating a draft and still forbids
   sending.
-- `accounts-and-auth`: `draft` becomes a known `mail_write` action.
+- `accounts-and-auth`: `draft` becomes a known `mail_write` action; `mail.write.send_from`
+  becomes an optional account setting.
 - `tool-conventions`: `mail_draft` joins the per-token tool set with its annotations; write
   instructions mention drafts; audit lines for drafts carry no addresses, subject or body.
 
 ## Impact
 
-- Code: `src/pv_icloud/config.py` (action), `mail/imap_write.py` (`APPEND`, `APPENDUID`),
+- Code: `src/pv_icloud/config.py` (action, `send_from`), `mail/imap_write.py` (`APPEND`, `APPENDUID`),
   `mail/service.py` (building the draft, reading the original), `server.py` (tool,
   instructions); `mail/sync.py` only through the existing resync hook. A new
   `mail/compose.py` builds the message (no IMAP calls). `mail/imap.py`, `dav.py`, `cal/`,
@@ -75,7 +84,7 @@ None.
 - Tests: `tests/fakeimap.py` gains `APPEND` with `APPENDUID` (and switches to omit it or
   fail); `tests/test_repo_policy.py` allows `.append()` only in `mail/imap_write.py` and only
   with `(\Draft \Seen)`.
-- Config: `config/pv-icloud.example.yaml` shows `draft`.
+- Config: `config/pv-icloud.example.yaml` shows `draft` and `send_from`.
 - Dependencies: none new (standard library `email`).
 - Egress: unchanged.
 - Security posture: a token with `draft` can create messages in Drafts. Prompt injection could

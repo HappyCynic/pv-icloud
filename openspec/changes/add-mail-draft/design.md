@@ -18,7 +18,7 @@ What exists today: `mail/imap_write.py` with `MailWriter.guarded_move` on a writ
 connection everywhere; `tests/fakeimap.py`, which has a `Drafts` folder with no special-use
 attribute and rejects `APPEND`.
 
-Modules touched: `config` (the `draft` action), `mail/imap_write` (`append_draft`), new
+Modules touched: `config` (the `draft` action and `mail.write.send_from`), `mail/imap_write` (`append_draft`), new
 `mail/compose` (builds the message; no IMAP), `mail/service` (`draft`), `server`
 (`mail_draft`, instructions). Not touched: `mail/imap`, `mail/sync` (only its existing resync
 hook is called), `dav`, `cal/`, `contacts/`, `people`. No new paging: the tool returns one
@@ -37,7 +37,7 @@ result. New limits: the three input limits in decision 3.
 
 **Non-Goals:**
 
-- Sending, `send_to`, `mail.write.send_from` (`add-mail-send`).
+- Sending and `send_to` (`add-mail-send`), including making `send_from` required for `send`.
 - Editing, replacing or deleting an existing draft; several drafts per call.
 - Attachments, HTML, quoting the original's text, filling in recipients from the original.
 
@@ -47,7 +47,16 @@ result. New limits: the three input limits in decision 3.
 
 `MAIL_WRITE_ACTIONS` gains `draft`. Validation is otherwise unchanged: `send` is still an
 unknown action (error lists the allowed actions), and a `draft` grant while the switch is off
-is the existing config error. `WRITE_TOOLS` gains `"mail_draft": "draft"`, so the existing
+is the existing config error.
+
+`mail.write.send_from` joins `_MAIL_WRITE_KEYS` now (maintainer's answer on PR #19). It is
+optional, merged from `defaults.mail.write` like `archive_folder`, and when set must be one
+bare address (`local@domain`: exactly one `@`, a non-empty local part, a domain with a dot,
+no spaces, commas, angle brackets or display name), the rule `add-mail-send` also uses;
+anything else is a config error naming the account and `mail.write.send_from`.
+`add-mail-send` makes it required for tokens granted `send`.
+
+`WRITE_TOOLS` gains `"mail_draft": "draft"`, so the existing
 `tools/list` filter, unknown-tool refusal and per-token instructions cover it with no new
 mechanism.
 
@@ -101,9 +110,8 @@ SMTP policy (CRLF line endings):
 - `In-Reply-To` and `References` for replies (decision 5).
 - Body: `text/plain; charset=utf-8`, set with `set_content`, which picks the transfer
   encoding.
-- No `From`: the configured sender address comes with `add-mail-send`
-  (`mail.write.send_from`), and Mail fills in the account's default sender when the person
-  opens the draft. See Open Questions.
+- `From`: the account's `mail.write.send_from` when set; otherwise no `From`, and Mail fills
+  in the account's default sender when the person opens the draft.
 
 ### 5. Replies
 
@@ -122,7 +130,7 @@ connection is opened. Then:
 - An original without a `Message-ID` still gives a `Re:` subject but no `In-Reply-To` or
   `References`.
 
-The original may be in a protected folder: protection fences moves, and reading it is
+The original may be in a protected folder: protection fences moves only, and reading it is
 allowed to any token. Recipients are not filled in from the original; the caller passes them.
 
 ### 6. Saving: `APPEND` in `mail/imap_write.py`
@@ -146,9 +154,8 @@ the guarded move):
    null` rather than failing, so a caller is not tempted to retry and create a duplicate.
 5. `LOGOUT`.
 
-Before the connection is opened, `MailService.draft` refuses with `folder is protected` when
-`Drafts` is in the effective protected folders (defaults, account and token, as in core
-decision 3), so a refused call sends no IMAP command at all.
+Protected folders do not apply: they govern moves only (ADR-0004, decision 3), so a
+protected `Drafts` does not block `mail_draft`. The `draft` grant is the control.
 
 Command stream on that connection: `CAPABILITY`, `LOGIN`, `LIST`, `APPEND`, `LOGOUT`.
 
@@ -167,7 +174,7 @@ hidden by default); the tool description says so.
 ### 7. Order of checks in `mail_draft`
 
 Permission (unknown tool if not granted) → rate limit (every call counts) → input limits
-(decision 3) → `nothing to draft` → Drafts not protected → read the original if
+(decision 3) → `nothing to draft` → read the original if
 `in_reply_to` (decision 5) → build the message (decision 4) → `append_draft` (decision 6:
 UIDPLUS, Drafts found, `APPEND`) → resync Drafts if it is in the read scope.
 
@@ -192,8 +199,9 @@ throttled calls. `result_count` is 1 on success.
   The person in Mail is the last check; drafts are clearly drafts; the rate limit caps volume;
   instructions and the description say untrusted content is never a reason to draft.
 - [A draft without `From` might show the wrong sender if the account has several addresses]
-  → Mail uses the account's default sender; the person sees and can change it before
-  sending. See Open Questions.
+  → Set `mail.write.send_from`; otherwise Mail uses the account's default sender, and the
+  person sees and can change it before sending. The fake cannot tell whether iCloud accepts
+  a draft without `From`; `send_from` is the fallback if it does not.
 - [`APPEND` succeeds but no `APPENDUID`] → Reported as saved with `id: null`, never retried.
 - [Drafts hidden from the read scope, so the new id cannot be read back] → Stated in the
   description; operators can show Drafts with `mail.special_folders.drafts: true`.
@@ -206,12 +214,10 @@ None. `draft` is a new, optional action; existing configs are unchanged. Rollbac
 
 ## Open Questions
 
-- **`From` header.** This proposal leaves it out and lets Mail fill in the account's default
-  sender. Alternatives: use the Apple ID from `PV_ICLOUD_<ID>_ICLOUD_USER` (not always a
-  sending address), or bring `mail.write.send_from` forward from `add-mail-send` as an
-  optional key now. Does iCloud accept and Mail open a draft without `From`? The fake cannot
-  tell; a check against a live account would settle it.
-- **Drafts folder name.** Fixed to `Drafts` (as the issue says). Should there be a
-  `mail.write.drafts_folder` override like `archive_folder`? Not proposed.
-- **Protected Drafts.** Proposed: protecting `Drafts` blocks `mail_draft`. Confirm, or should
-  protection stay limited to moves?
+None left. The maintainer answered the proposal's three questions on PR #19:
+
+- **`From` header.** From the optional `mail.write.send_from` when set; left out otherwise
+  (decisions 1 and 4).
+- **Drafts folder name.** Fixed to `Drafts`; no `drafts_folder` override.
+- **Protected Drafts.** Protected folders govern moves only; they do not block `mail_draft`
+  (decision 6).

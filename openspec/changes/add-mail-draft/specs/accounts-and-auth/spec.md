@@ -46,3 +46,32 @@ stop startup with an error naming the account, the token label and the key.
 - **WHEN** a token has only `label` and `sha256`
 - **THEN** it loads with no write actions, no extra protected folders and a write limit of 30
   per hour
+
+### Requirement: Mail write settings per account
+Each account's `mail` section (merged from `defaults.mail` as usual) MAY contain `write` with
+`protected_folders` (list of folder names, default empty), `archive_folder` (folder name,
+default `Archive`) and `send_from` (a single bare address `local@domain`, default unset). The
+protected folders that apply to an account SHALL be every name listed in
+`defaults.mail.write.protected_folders` and in the account's own
+`mail.write.protected_folders`: an account list adds to the defaults and never replaces them.
+`send_from` SHALL be taken from the account, or else from `defaults.mail.write`. A value of
+the wrong type, a `send_from` that is not one bare address, or an unknown key under
+`mail.write`, SHALL stop startup with an error naming the account and key.
+
+#### Scenario: Defaults and account both protect folders
+- **WHEN** `defaults.mail.write.protected_folders` is `[Taxes]` and an account's is `[Banking]`
+- **THEN** both `Taxes` and `Banking` are protected for that account
+
+#### Scenario: Archive folder override
+- **WHEN** an account sets `mail.write.archive_folder: Old Mail`
+- **THEN** `mail_archive` for that account moves messages to `Old Mail`
+
+#### Scenario: From address for drafts
+- **WHEN** `defaults.mail.write.send_from` is `me@example.com` and an account sets none
+- **THEN** that account's drafts carry `From: me@example.com`
+
+#### Scenario: Invalid From address
+- **WHEN** an account sets `mail.write.send_from` to `not-an-address` or
+  `Me <me@example.com>`
+- **THEN** loading the config fails with an error naming the account and
+  `mail.write.send_from`
