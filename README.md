@@ -4,10 +4,12 @@
 [![Release](https://img.shields.io/github/v/release/HappyCynic/pv-icloud?sort=semver)](https://github.com/HappyCynic/pv-icloud/releases)
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-A **read-only** [Model Context Protocol](https://modelcontextprotocol.io) server that lets MCP
-clients (Claude Code, Claude Desktop, …) search and read **iCloud Mail**, **Calendar** and
-**Contacts**. One server can serve several iCloud accounts; each bearer token maps to exactly
-one account.
+A [Model Context Protocol](https://modelcontextprotocol.io) server, **read-only by default**,
+that lets MCP clients (Claude Code, Claude Desktop, …) search and read **iCloud Mail**,
+**Calendar** and **Contacts**. One server can serve several iCloud accounts; each bearer token
+maps to exactly one account. Moving, archiving and deleting mail can be switched on per
+deployment and granted per token ([Mail writes](#mail-writes-opt-in)); Calendar and Contacts
+are always read-only.
 
 > **Status:** early. Mail, calendar and contacts tools work against real iCloud. Interfaces may change
 > before 1.0.
@@ -31,10 +33,38 @@ one account.
 | `contacts_get` | One contact: names, emails, phones and addresses with labels, birthday, dates, related names, social profiles, groups, note |
 | `contacts_groups` | Contact groups with member counts |
 
-There are **no** tools that send, move, delete or flag mail, change events or change
-contacts. The IMAP layer never issues write commands (folders are opened with `EXAMINE` and
-messages fetched with `BODY.PEEK`, so read state never changes), and the CalDAV and CardDAV
-clients can only send `PROPFIND` and `REPORT`.
+Unless [mail writes](#mail-writes-opt-in) are switched on and granted, there are **no** tools
+that send, move, delete or flag mail, change events or change contacts. The IMAP read path
+never issues write commands (folders are opened with `EXAMINE` and messages fetched with
+`BODY.PEEK`, so read state never changes), and the CalDAV and CardDAV clients can only send
+`PROPFIND` and `REPORT`.
+
+### Mail writes (opt-in)
+
+Off unless the deployment sets `PV_ICLOUD_MAIL_WRITE=enabled` **and** a token lists the
+action in `mail_write` ([ADR-0004](docs/adr/0004-opt-in-mail-write.md)). Each action is
+granted on its own; a token sees only the tools it was granted, and a token without
+`mail_write` sees exactly the read-only server.
+
+| Tool | Grant | Purpose |
+|---|---|---|
+| `mail_move` | `move` | Move one message to another in-scope folder |
+| `mail_archive` | `archive` | Move one message to the archive folder (`Archive`, found by name) |
+| `mail_delete` | `delete` | Move one message to `Deleted Messages`; it stays recoverable there until iCloud empties that folder. Nothing is ever deleted permanently. |
+
+- One message per call; the result has the message's `new_id`.
+- **Guarded move:** iCloud has no IMAP `MOVE`, so the message is copied (`UID COPY`), and
+  only once the server confirms that copy (`COPYUID`) is the original marked `\Deleted` and
+  expunged, by its UID alone. If a step fails, the error says where the message is; it is
+  never lost. Read state and flags are kept.
+- **Protected folders** (`mail.write.protected_folders` in the defaults and per account, plus
+  a token's own `protected_folders`): nothing moves into or out of them.
+- **Write limit** per token: `max_writes_per_hour` (default 30), counted in memory; a restart
+  resets it.
+- Write calls are audited with `"write": true` and no folder names.
+
+Prompt injection in mail can now cause actions, not just reads. Grant writes only to clients
+that confirm actions with a person; see [SECURITY.md](SECURITY.md).
 
 **Contacts** are kept in memory only (never written to disk): the first call (or startup)
 loads the address book, and later calls fetch only what changed, at most once a minute.
@@ -80,7 +110,8 @@ See [SECURITY.md](SECURITY.md) for how to report a vulnerability and the threat 
   `mail.special_folders`. Excluded folders are purged from the index on the next sync.
 - **iCloud credentials** are app-specific passwords from the environment, never from config.
 - **Audit log:** one JSON line per tool call on stdout (account, token label, tool, result
-  count, latency). Search text and ids are redacted to their length.
+  count, latency; `"write": true` for mail writes). Search text, ids and folder names are
+  redacted to their length.
 - **Container:** non-root (10001:10001), read-only root filesystem, no capabilities.
 - **No TLS** in the server itself: run it on a private network (LAN, VPN, Tailscale) or
   behind a TLS reverse proxy. Do not expose it directly to the internet.
@@ -141,6 +172,8 @@ See [`config/pv-icloud.example.yaml`](config/pv-icloud.example.yaml). Per accoun
 | `mail.special_folders.junk` / `deleted_messages` / `drafts` | `false` | Show `Junk`, `Deleted Messages`, `Drafts` (hidden by default) |
 | `mail.max_age_days` | `730` | Index window; searches are clamped to it |
 | `mail.max_connections` | `2` | IMAP connections (iCloud limits per Apple ID); one is reserved for sync |
+| `mail.write.protected_folders` | `[]` | No mail write moves messages into or out of these folders; an account's list adds to the defaults' |
+| `mail.write.archive_folder` | `Archive` | Where `mail_archive` moves messages |
 | `calendar.calendars.include` / `exclude` | `"*"` / `[]` | Calendar scope (display names, globs allowed) |
 | `calendar.max_range_days` | `90` | Longest `calendar_events` range |
 | `calendar.max_search_days` | `730` | Longest `calendar_search` range |
@@ -149,10 +182,19 @@ See [`config/pv-icloud.example.yaml`](config/pv-icloud.example.yaml). Per accoun
 | `contacts.enabled` | `true` | Contacts tools for this account; `find_person` then uses mail only |
 | `contacts.exclude_groups` | `[]` | Hide every contact in these groups (names, globs allowed) |
 
+Per token (under `accounts[].tokens[]`, besides `label` and `sha256`):
+
+| Key | Default | Meaning |
+|---|---|---|
+| `mail_write` | `[]` | Mail write actions this token may use: `move`, `archive`, `delete`. Needs `PV_ICLOUD_MAIL_WRITE=enabled`, otherwise startup fails |
+| `protected_folders` | `[]` | Added to the account's protected folders for this token only |
+| `max_writes_per_hour` | `30` | This token's write limit (sliding hour, held in memory) |
+
 Environment: `PV_ICLOUD_CONFIG` (config path), `PV_ICLOUD_DATA_DIR` (index root),
 `PV_ICLOUD_PORT` (default 8771), `PV_ICLOUD_HOST` (default `127.0.0.1`; the image sets
 `0.0.0.0`; any non-loopback address logs a plain-HTTP warning at startup),
-`PV_ICLOUD_LOG_LEVEL`.
+`PV_ICLOUD_LOG_LEVEL`, `PV_ICLOUD_MAIL_WRITE` (`enabled` turns mail writes on; unset, empty
+or `disabled` leaves them off; any other value is a config error).
 
 ## Resources and backups
 

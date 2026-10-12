@@ -14,6 +14,20 @@ each version.
 - Spec-driven development with [OpenSpec](https://github.com/Fission-AI/OpenSpec) 1.13.2
   (`openspec/`, Claude Code commands and skills in `.claude/`), and an issue workflow for
   agents: `agent:propose` produces a reviewed proposal, `agent:implement` builds it.
+- Opt-in mail writes ([ADR-0004](docs/adr/0004-opt-in-mail-write.md)), off by default:
+  - Deployment switch `PV_ICLOUD_MAIL_WRITE=enabled`. Without it nothing changes: the write
+    code is not loaded, and a token with a write grant is a config error.
+  - `mail_move`, `mail_archive` and `mail_delete`, granted per token with
+    `mail_write: [move, archive, delete]`. A token sees only the write tools it was granted;
+    a token without `mail_write` sees exactly the read-only tools and instructions.
+  - One message per call, moved by a guarded copy-then-remove: the original is removed only
+    after iCloud confirms the copy. `mail_delete` only moves mail to Deleted Messages, where
+    it stays recoverable until iCloud empties that folder.
+  - Protected folders (`mail.write.protected_folders` in the defaults and per account, plus a
+    token's own `protected_folders`): nothing moves into or out of them.
+  - Per-token write limit `max_writes_per_hour` (default 30), held in memory.
+  - `mail.write.archive_folder` (default `Archive`).
+  - Write calls are audited with `"write": true` and no folder names.
 
 ## [0.1.0] - 2026-10-10
 

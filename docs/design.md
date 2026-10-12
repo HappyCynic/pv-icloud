@@ -6,13 +6,16 @@ How Private iCloud MCP (`pv-icloud`) works and why. Decisions with more backgrou
 ## Goals
 
 - Let an MCP client search and read one person's **iCloud Mail, Calendar and Contacts**.
-- **Read-only by construction**: no code path can change iCloud data or read state.
+- **Read-only by default**: no read path can change iCloud data or read state. Moving,
+  archiving and deleting mail exist only when the deployment switches them on and a token is
+  granted them ([Mail writes](#mail-writes); ADR-0004). Calendar and Contacts are always
+  read-only.
 - Serve **several iCloud accounts** from one server, each strictly isolated (ADR-0003).
 - Fast enough for interactive use: cross-folder mail search well under a second.
 - Run on a small always-on host (a home server or NAS), not on a Mac.
 
 Out of scope: Reminders and Notes (iCloud does not expose current Reminders or Notes over a
-standard protocol; ADR-0002), and any write action.
+standard protocol; ADR-0002), and any write action other than the opt-in mail writes.
 
 ## Overview
 
@@ -34,7 +37,8 @@ client and a CardDAV client with an in-memory contacts cache.
 | `config` | YAML config, per-account defaults and overrides |
 | `auth` | Bearer token → account (SHA-256, constant-time) |
 | `server` | Tool definitions, audit log, `/healthz`, per-account runtime |
-| `mail/` | IMAP pool, message parsing, HTML → text, FTS5 index, sync worker, tools |
+| `mail/` | IMAP pool, message parsing, HTML → text, FTS5 index, sync worker, tools; `mail/imap_write.py` is the only code that changes mail (loaded only when writes are on) |
+| `ratelimit` | Per-token mail write limit (in memory) |
 | `dav` | Read-only WebDAV base (`PROPFIND`/`REPORT` only), shared throttle |
 | `cal/` | CalDAV client, subscribed-feed fetcher, recurrence expansion, event ids, tools |
 | `contacts/` | CardDAV client, vCard parser, contacts cache and tools |
@@ -56,6 +60,12 @@ client and a CardDAV client with an in-memory contacts cache.
 | `contacts_get` | Every field of one contact |
 | `contacts_groups` | Groups and member counts |
 | `find_person` | Who someone is: their contact card merged with their mail history |
+| `mail_move` | *Opt-in write.* Moves one message to another in-scope folder |
+| `mail_archive` | *Opt-in write.* Moves one message to the archive folder |
+| `mail_delete` | *Opt-in write.* Moves one message to Deleted Messages (never a permanent delete) |
+
+The write tools exist only with `PV_ICLOUD_MAIL_WRITE=enabled` and are listed only to tokens
+granted them; see [Mail writes](#mail-writes).
 
 Conventions shared by all tools:
 
@@ -106,6 +116,49 @@ anything.
 **Scope.** Every folder by default, minus a per-account `exclude` list. `Junk`,
 `Deleted Messages` and `Drafts` are hidden unless turned on. Leaving the scope purges a
 folder's rows on the next sync.
+
+## Mail writes
+
+Decided in [ADR-0004](adr/0004-opt-in-mail-write.md). Three layers have to agree before mail
+changes:
+
+1. **Deployment switch.** `PV_ICLOUD_MAIL_WRITE=enabled`. Without it `mail/imap_write.py` is
+   never imported, no write tool is registered, and a token with `mail_write` is a config
+   error. Any value other than `enabled`, `disabled` or empty is a config error too.
+2. **Per-token grant.** `mail_write: [move, archive, delete]`, each action on its own. The
+   server lists each token only its granted write tools (SDK middleware filters `tools/list`)
+   and refuses the others exactly as it refuses a tool that does not exist. A token with
+   write actions gets server instructions naming them; a token without gets the read-only
+   instructions unchanged (a snapshot test pins its whole `tools/list` and instructions).
+3. **Per-call checks**, before anything that can change mail: the token's hourly write limit
+   (sliding window, in memory, every granted call counts), the source and destination scope,
+   and protected folders (defaults ∪ account ∪ token, so a lower layer can only tighten).
+
+**Guarded move.** iCloud advertises `UIDPLUS` and `UNSELECT` but not `MOVE`, so move,
+archive and delete all copy and then remove, on a fresh connection that is logged out
+afterwards and never returned to the read pool:
+
+1. No `UIDPLUS` (needed for `COPYUID` and `UID EXPUNGE`): fail before anything is sent.
+2. `LIST` to resolve the destination: `mail_move`'s folder must be in scope; Archive is found
+   by name (`mail.write.archive_folder`, default `Archive`); Deleted Messages is the `\Trash`
+   folder, else the one with that name. Archive and Deleted Messages work even when hidden
+   from reads.
+3. `SELECT` the source; its `UIDVALIDITY` must match the id; `UID FETCH <uid> (UID FLAGS)`
+   confirms the message is there (flags only: after `SELECT` a body fetch would set `\Seen`).
+4. `UID COPY <uid>`. The `COPYUID` response must name exactly this UID and the destination's
+   `UIDVALIDITY`; otherwise stop, with the original untouched.
+5. `UID STORE <uid> +FLAGS.SILENT (\Deleted)`, then `UID EXPUNGE <uid>`, which removes only
+   this UID, never other messages someone else marked `\Deleted`. `CLOSE` is never used.
+
+A message leaves its source only after its copy is confirmed. A failure after the copy
+leaves a duplicate (or a source copy marked `\Deleted`), never a loss, and the tool error
+says which. The copy keeps every flag, and `new_id` comes from `COPYUID`. Afterwards the
+old id is dropped from the index and the sync worker resyncs both folders at once.
+
+`tests/test_repo_policy.py` inspects the code's IMAP call sites: only `mail/imap_write.py`
+may `SELECT`, and only with these single-UID forms; nothing may `STORE`, `COPY`, `EXPUNGE`,
+`CLOSE`, `MOVE`, `APPEND` or touch folders. The fake IMAP server rejects every other form
+at run time.
 
 ## Calendar
 
@@ -170,8 +223,9 @@ See ADR-0003. In short: config holds SHA-256 hashes of bearer tokens; each token
 one account; credentials come from `PV_ICLOUD_<ID>_ICLOUD_USER` and
 `PV_ICLOUD_<ID>_APP_PASSWORD`. Each account has its own index file, connection pool, sync
 thread, DAV clients and contacts cache. Audit lines (JSON on stdout) record account, token
-label, tool, redacted arguments, result count and latency; search text and ids are reduced to
-their length.
+label, tool, redacted arguments, result count and latency; search text, ids and folder names
+are reduced to their length. Mail write calls also carry `write: true`, and a call refused by
+the write limit has outcome `throttled`.
 
 `/healthz` is open for container health checks and returns only `{"status"}` (503 only when
 every account's mail sync has failed). With a valid bearer token it adds the caller's own
