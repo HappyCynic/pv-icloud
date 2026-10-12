@@ -6,8 +6,8 @@
 from __future__ import annotations
 
 import datetime as dt
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Callable, Iterable, Mapping, Sequence
+from typing import TYPE_CHECKING, Any
 
 from ..config import AccountConfig
 from ..errors import ToolInputError
@@ -17,6 +17,9 @@ from .index import IndexedMessage, MailIndex
 from .parse import ParsedMessage, parse_message
 from .sync import MailSync
 
+if TYPE_CHECKING:  # imported at run time only when mail writes are switched on
+    from .imap_write import MailWriter
+
 MAX_FETCH_BYTES = 5 * 1024 * 1024
 SEARCH_LIMIT_DEFAULT = 20
 SEARCH_LIMIT_MAX = 50
@@ -25,6 +28,15 @@ THREAD_LIMIT_MAX = 100
 GET_MAX_CHARS = 20_000
 WEB_URL = "https://www.icloud.com/mail/"
 WEB_URL_NOTE = "iCloud Mail has no per-message deep links; this opens the mailbox."
+TRASH = "Deleted Messages"
+PROTECTED = "folder is protected"
+
+
+def _protected(name: str, protected: Iterable[str]) -> bool:
+    """Exact names, except INBOX, which IMAP treats case-insensitively."""
+    if name.upper() == "INBOX":
+        return any(p.upper() == "INBOX" for p in protected)
+    return name in protected
 
 
 def parse_when(value: str | None, field: str) -> dt.datetime | None:
@@ -47,12 +59,18 @@ def _iso(epoch: float | None) -> str | None:
 
 class MailService:
     def __init__(
-        self, account: AccountConfig, index: MailIndex, pool: ImapPool, sync: MailSync | None
+        self,
+        account: AccountConfig,
+        index: MailIndex,
+        pool: ImapPool,
+        sync: MailSync | None,
+        writer: MailWriter | None = None,  # only when PV_ICLOUD_MAIL_WRITE=enabled
     ):
         self.account = account
         self.index = index
         self.pool = pool
         self.sync = sync
+        self.writer = writer
 
     # --- scope -------------------------------------------------------------------------
 
@@ -235,4 +253,86 @@ class MailService:
             "total": len(members),
             "offset": offset,
             "next_offset": end if end < len(members) else None,
+        }
+
+    # --- writes (ADR-0004) -------------------------------------------------------------
+    # Every refusal here happens before mail/imap_write.py sends anything that can change
+    # mail. `token_protected` is the calling token's own protected_folders.
+
+    def move(self, mail_id: str, folder: str, token_protected: Sequence[str] = ()) -> dict:
+        mid, protected = self._write_source(mail_id, token_protected)
+        self._check_folder(folder)  # the caller's destination must be in scope
+        if _protected(folder, protected):
+            raise ToolInputError(PROTECTED)
+        if folder == mid.folder:
+            raise ToolInputError("message is already in that folder")
+
+        def resolve(folders: Mapping[str, frozenset[str]]) -> str:
+            if folder not in folders:
+                raise ToolInputError(f"unknown folder: {folder}")
+            return folder
+
+        return self._move(mid, resolve)
+
+    def archive(self, mail_id: str, token_protected: Sequence[str] = ()) -> dict:
+        mid, protected = self._write_source(mail_id, token_protected)
+        archive = self.account.mail.write.archive_folder  # by name, even if hidden from reads
+        if _protected(archive, protected):
+            raise ToolInputError(PROTECTED)
+        if mid.folder == archive:
+            raise ToolInputError("message is already in the archive folder")
+
+        def resolve(folders: Mapping[str, frozenset[str]]) -> str:
+            from .imap_write import find_archive
+
+            found = find_archive(folders, archive)
+            if found is None:
+                raise ToolInputError("archive folder not found; nothing was changed")
+            return found
+
+        return self._move(mid, resolve)
+
+    def delete(self, mail_id: str, token_protected: Sequence[str] = ()) -> dict:
+        """Move to Deleted Messages (even if hidden from reads). Never deletes permanently."""
+        mid, protected = self._write_source(mail_id, token_protected)
+        if mid.folder == TRASH:
+            raise ToolInputError("already in Deleted Messages")
+
+        def resolve(folders: Mapping[str, frozenset[str]]) -> str:
+            from .imap_write import find_trash
+
+            trash = find_trash(folders)
+            if trash is None:
+                raise ToolInputError("Deleted Messages folder not found; nothing was changed")
+            if trash == mid.folder:
+                raise ToolInputError("already in Deleted Messages")
+            if _protected(trash, protected):
+                raise ToolInputError(PROTECTED)
+            return trash
+
+        return self._move(mid, resolve)
+
+    def _write_source(
+        self, mail_id: str, token_protected: Sequence[str]
+    ) -> tuple[MailId, tuple[str, ...]]:
+        if self.writer is None:
+            raise ToolInputError("mail writes are not enabled")
+        mid = self._resolve(mail_id)
+        protected = self.account.mail.write.protected_folders + tuple(token_protected)
+        if _protected(mid.folder, protected):
+            raise ToolInputError(PROTECTED)
+        return mid, protected
+
+    def _move(self, mid: MailId, resolve: Callable[[Mapping[str, frozenset[str]]], str]) -> dict:
+        assert self.writer is not None
+        moved = self.writer.guarded_move(mid, resolve)
+        # Drop the old id now so searches stop returning it; sync indexes the new one.
+        self.index.remove(mid.folder, [mid.uid])
+        if self.sync is not None:
+            self.sync.request_resync(moved.from_folder, moved.to_folder)
+        return {
+            "moved": True,
+            "from_folder": moved.from_folder,
+            "to_folder": moved.to_folder,
+            "new_id": moved.new_id.encode(),
         }

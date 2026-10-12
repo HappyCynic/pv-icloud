@@ -14,17 +14,23 @@ import contextvars
 import hashlib
 import hmac
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from .config import Config
+from .config import MAX_WRITES_PER_HOUR, Config
 
 
 @dataclass(frozen=True)
 class AccountContext:
     account_id: str
     token_label: str
+    # The token's own mail write permissions (ADR-0004); empty for a read-only token.
+    mail_write: frozenset[str] = frozenset()
+    protected_folders: tuple[str, ...] = ()
+    max_writes_per_hour: int = MAX_WRITES_PER_HOUR
+    # Keys the per-token write limit; the configured hash, so never shown in repr or logs.
+    token_key: str = field(default="", repr=False)
 
 
 _current: contextvars.ContextVar[AccountContext | None] = contextvars.ContextVar(
@@ -43,7 +49,17 @@ def current_account() -> AccountContext:
 class TokenTable:
     def __init__(self, config: Config):
         self._entries = [
-            (bytes.fromhex(t.sha256), AccountContext(acct.id, t.label))
+            (
+                bytes.fromhex(t.sha256),
+                AccountContext(
+                    acct.id,
+                    t.label,
+                    mail_write=t.mail_write,
+                    protected_folders=t.protected_folders,
+                    max_writes_per_hour=t.max_writes_per_hour,
+                    token_key=t.sha256,
+                ),
+            )
             for acct in config.accounts
             for t in acct.tokens
         ]

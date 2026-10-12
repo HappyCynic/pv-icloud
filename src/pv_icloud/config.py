@@ -28,6 +28,12 @@ SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 # Config key -> folder display name. When hidden they are hidden whatever include says.
 SPECIAL_FOLDERS = {"junk": "Junk", "deleted_messages": "Deleted Messages", "drafts": "Drafts"}
 
+# Mail writes (docs/adr/0004-opt-in-mail-write.md): off unless this variable is `enabled`.
+MAIL_WRITE_ENV = "PV_ICLOUD_MAIL_WRITE"
+MAIL_WRITE_ACTIONS = ("move", "archive", "delete")
+MAX_WRITES_PER_HOUR = 30
+_MAIL_WRITE_KEYS = ("protected_folders", "archive_folder")
+
 
 class ConfigError(Exception):
     pass
@@ -52,10 +58,20 @@ class Scope:
 
 
 @dataclass(frozen=True)
+class MailWriteConfig:
+    """Per-account `mail.write` settings (ADR-0004); used only when writes are switched on."""
+
+    # Defaults and account lists together: an account adds to the defaults, never replaces.
+    protected_folders: tuple[str, ...] = ()
+    archive_folder: str = "Archive"
+
+
+@dataclass(frozen=True)
 class MailConfig:
     folders: Scope  # its `hidden` holds the special folders not turned on
     max_age_days: int = 730
     max_connections: int = 2
+    write: MailWriteConfig = MailWriteConfig()
 
 
 @dataclass(frozen=True)
@@ -82,6 +98,9 @@ class ContactsConfig:
 class TokenEntry:
     label: str
     sha256: str
+    mail_write: frozenset[str] = frozenset()  # granted actions from MAIL_WRITE_ACTIONS
+    protected_folders: tuple[str, ...] = ()  # added to the account's protected folders
+    max_writes_per_hour: int = MAX_WRITES_PER_HOUR
 
 
 @dataclass(frozen=True)
@@ -99,6 +118,7 @@ class AccountConfig:
 class Config:
     accounts: tuple[AccountConfig, ...]
     data_dir: Path
+    mail_write: bool = False  # PV_ICLOUD_MAIL_WRITE=enabled
 
     def account(self, account_id: str) -> AccountConfig:
         for acct in self.accounts:
@@ -168,7 +188,65 @@ def _timezone(value: Any, where: str) -> str | None:
     return str(value)
 
 
+def _names(value: Any, where: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(x, str) and x for x in value):
+        raise ConfigError(f"{where} must be a list of folder names")
+    return tuple(value)
+
+
+def _mail_write_switch(env: Mapping[str, str]) -> bool:
+    value = env.get(MAIL_WRITE_ENV, "").strip()
+    if value not in ("", "disabled", "enabled"):
+        raise ConfigError(f"{MAIL_WRITE_ENV} must be `enabled` or `disabled` (or unset)")
+    return value == "enabled"
+
+
+def _token(t: Mapping[str, Any], label: str, digest: str, where: str) -> TokenEntry:
+    where = f"{where}: token {label!r}"
+    actions = t.get("mail_write", [])
+    if not isinstance(actions, list) or not all(isinstance(a, str) for a in actions):
+        raise ConfigError(f"{where} mail_write must be a list of actions")
+    unknown = [a for a in actions if a not in MAIL_WRITE_ACTIONS]
+    if unknown:
+        raise ConfigError(
+            f"{where} mail_write: unknown action(s) {', '.join(unknown)}; "
+            f"allowed: {', '.join(MAIL_WRITE_ACTIONS)}"
+        )
+    return TokenEntry(
+        label=label,
+        sha256=digest,
+        mail_write=frozenset(actions),
+        protected_folders=_names(t.get("protected_folders", []), f"{where} protected_folders"),
+        max_writes_per_hour=_positive_int(
+            t.get("max_writes_per_hour", MAX_WRITES_PER_HOUR), f"{where} max_writes_per_hour"
+        ),
+    )
+
+
+def _write_section(raw: Any, where: str) -> Mapping[str, Any]:
+    raw = raw or {}
+    if not isinstance(raw, Mapping):
+        raise ConfigError(f"{where} must be a mapping")
+    unknown = set(raw) - set(_MAIL_WRITE_KEYS)
+    if unknown:
+        known = ", ".join(_MAIL_WRITE_KEYS)
+        raise ConfigError(f"{where}: unknown key(s) {', '.join(sorted(unknown))}; use {known}")
+    return raw
+
+
+def _mail_write(defaults: Any, account: Any, where: str) -> MailWriteConfig:
+    base = _write_section(defaults, "defaults.mail.write")
+    own = _write_section(account, f"{where}.mail.write")
+    protected = _names(base.get("protected_folders", []), "defaults.mail.write.protected_folders")
+    protected += _names(own.get("protected_folders", []), f"{where}.mail.write.protected_folders")
+    archive = own.get("archive_folder", base.get("archive_folder", "Archive"))
+    if not isinstance(archive, str) or not archive:
+        raise ConfigError(f"{where}.mail.write.archive_folder must be a folder name")
+    return MailWriteConfig(tuple(dict.fromkeys(protected)), archive)
+
+
 def parse_config(raw: Mapping[str, Any], env: Mapping[str, str], data_dir: Path) -> Config:
+    mail_write = _mail_write_switch(env)
     defaults = raw.get("defaults") or {}
     accounts_raw = raw.get("accounts") or []
     if not isinstance(accounts_raw, list) or not accounts_raw:
@@ -197,7 +275,13 @@ def parse_config(raw: Mapping[str, Any], env: Mapping[str, str], data_dir: Path)
             if digest in seen_hashes:
                 raise ConfigError(f"{where}: token {label!r} hash is used by another token")
             seen_hashes.add(digest)
-            tokens.append(TokenEntry(label=label, sha256=digest))
+            token = _token(t, label, digest, where)
+            if token.mail_write and not mail_write:
+                raise ConfigError(
+                    f"{where}: token {label!r} has mail_write but {MAIL_WRITE_ENV} is not "
+                    "`enabled`; set it or remove the grant"
+                )
+            tokens.append(token)
         if not tokens:
             raise ConfigError(f"{where}: at least one token is required")
 
@@ -215,6 +299,11 @@ def parse_config(raw: Mapping[str, Any], env: Mapping[str, str], data_dir: Path)
             max_age_days=_positive_int(mail_raw.get("max_age_days", 730), f"{where}.max_age_days"),
             max_connections=_positive_int(
                 mail_raw.get("max_connections", 2), f"{where}.max_connections"
+            ),
+            write=_mail_write(
+                (defaults.get("mail") or {}).get("write"),
+                (acct.get("mail") or {}).get("write"),
+                where,
             ),
         )
         if mail.max_connections < 2:
@@ -263,7 +352,7 @@ def parse_config(raw: Mapping[str, Any], env: Mapping[str, str], data_dir: Path)
                 app_password=password,
             )
         )
-    return Config(accounts=tuple(accounts), data_dir=data_dir)
+    return Config(accounts=tuple(accounts), data_dir=data_dir, mail_write=mail_write)
 
 
 def load_config(

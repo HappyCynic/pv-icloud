@@ -30,18 +30,35 @@ def make_config(
     alice_calendar=None,
     alice_special=None,
     alice_contacts=None,
+    alice_tokens=(),
+    alice_write=None,
+    default_write=None,
+    mail_write=False,
 ):
+    """Accounts alice and bob. `alice_tokens` adds tokens to alice's (label -> extra keys,
+    hashed from `<label>-token`); `mail_write` sets PV_ICLOUD_MAIL_WRITE=enabled."""
     raw = {
         "defaults": {
-            "mail": {"folders": {"include": "*", "exclude": []}, "max_age_days": max_age_days},
+            "mail": {
+                "folders": {"include": "*", "exclude": []},
+                "max_age_days": max_age_days,
+                **({"write": default_write} if default_write is not None else {}),
+            },
         },
         "accounts": [
             {
                 "id": "alice",
-                "tokens": [{"label": "laptop", "sha256": sha(TOKENS["alice"])}],
+                "tokens": [
+                    {"label": "laptop", "sha256": sha(TOKENS["alice"])},
+                    *(
+                        {"label": label, "sha256": sha(f"{label}-token"), **extra}
+                        for label, extra in alice_tokens
+                    ),
+                ],
                 "mail": {
                     "folders": {"exclude": list(alice_exclude)},
                     **({"special_folders": alice_special} if alice_special is not None else {}),
+                    **({"write": alice_write} if alice_write is not None else {}),
                 },
                 "calendar": alice_calendar or {},
                 "contacts": alice_contacts or {},
@@ -54,6 +71,7 @@ def make_config(
         "PV_ICLOUD_ALICE_APP_PASSWORD": "app-pw",
         "PV_ICLOUD_BOB_ICLOUD_USER": "bob@icloud.com",
         "PV_ICLOUD_BOB_APP_PASSWORD": "app-pw",
+        **({"PV_ICLOUD_MAIL_WRITE": "enabled"} if mail_write else {}),
     }
     return parse_config(raw, env, tmp_path / "data")
 
@@ -69,7 +87,7 @@ def server():
 class Harness:
     """One account wired to a FakeServer: index, sync, pool, service."""
 
-    def __init__(self, server: FakeServer, account, data_dir):
+    def __init__(self, server: FakeServer, account, data_dir, *, write=False):
         self.server = server
         self.account = account
         self.index = MailIndex(data_dir / account.id / "mail.sqlite3")
@@ -82,7 +100,12 @@ class Harness:
 
         self.sync = MailSync(account, self.index, sync_client)
         self.pool = ImapPool(account.icloud_user, account.app_password, 1, factory)
-        self.service = MailService(account, self.index, self.pool, self.sync)
+        writer = None
+        if write:
+            from pv_icloud.mail.imap_write import MailWriter
+
+            writer = MailWriter(self.pool)
+        self.service = MailService(account, self.index, self.pool, self.sync, writer=writer)
         self._client = None
 
     def run_sync(self) -> int:

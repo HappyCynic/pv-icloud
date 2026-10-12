@@ -102,6 +102,10 @@ class MailSync:
         self._thread: threading.Thread | None = None
         self._client: ImapClient | None = None
         self.inbox_changed = threading.Event()
+        # Folders a mail write touched, synced before the next periodic pass.
+        self._resync: set[str] = set()
+        self._resync_lock = threading.Lock()
+        self._wake = threading.Event()
 
     # --- one pass ----------------------------------------------------------------------
 
@@ -179,6 +183,31 @@ class MailSync:
                 self.status.folder_errors[name] = str(exc)
         return added
 
+    def request_resync(self, *folders: str) -> None:
+        """Ask the worker to sync these folders soon (after a mail write), not in 5 minutes.
+
+        Folders outside the read scope are skipped. During IDLE on INBOX the request waits
+        for the current IDLE chunk to end; a write involving INBOX ends it at once.
+        """
+        with self._resync_lock:
+            self._resync.update(folders)
+        self._wake.set()
+
+    def _sync_requested(self, client: ImapClient) -> None:
+        with self._resync_lock:
+            names, self._resync = sorted(self._resync), set()
+            self._wake.clear()
+        scope = self.account.mail.folders
+        for name in names:
+            if not scope.allows(name):
+                continue
+            try:
+                self.sync_folder(client, name)
+                self.status.folder_errors.pop(name, None)
+            except ImapError as exc:
+                log.warning("%s: folder %r failed: %s", self.account.id, name, exc)
+                self.status.folder_errors[name] = str(exc)
+
     # --- worker thread -----------------------------------------------------------------
 
     def start(self) -> None:
@@ -189,6 +218,7 @@ class MailSync:
 
     def stop(self, timeout: float = 5.0) -> None:
         self._stop.set()
+        self._wake.set()
         if self._thread:
             self._thread.join(timeout)
         if self._client:
@@ -230,11 +260,12 @@ class MailSync:
         deadline = time.monotonic() + self.interval
         idle_ok = "IDLE" in client.capabilities and self.account.mail.folders.allows("INBOX")
         while not self._stop.is_set():
+            self._sync_requested(client)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 return
             if not idle_ok:
-                self._stop.wait(remaining)
+                self._wake.wait(remaining)  # set by request_resync() and stop()
                 continue
             client.examine("INBOX")
             changed = False
