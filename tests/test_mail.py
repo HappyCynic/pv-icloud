@@ -11,7 +11,7 @@ import time
 
 import pytest
 
-from pv_icloud.mail.ids import MailId
+from pv_icloud.mail.ids import MailId, decode_id
 from pv_icloud.mail.parse import parse_message
 from pv_icloud.mail.service import ToolInputError
 
@@ -359,6 +359,246 @@ class TestTools:
         assert ("CAPABILITY",) in server.commands  # the log covers connect, too
         assert {c[0] for c in server.commands} <= ALLOWED_IMAP_COMMANDS
         assert {c[1] for c in server.commands if c[0] == "UID"} <= {"SEARCH", "FETCH"}
+
+
+class TestWrites:
+    """mail_move, mail_archive and mail_delete at the service layer (ADR-0004)."""
+
+    WRITE_COMMANDS = ("SELECT", "UID COPY", "UID STORE", "UID EXPUNGE")
+
+    @staticmethod
+    def sent(server) -> list[str]:
+        return [" ".join(c[:2]) if c[0] == "UID" else c[0] for c in server.commands]
+
+    def no_write_sent(self, server) -> bool:
+        return not set(self.sent(server)) & set(self.WRITE_COMMANDS)
+
+    @pytest.fixture
+    def make(self, server, tmp_path):
+        server.folder("Archive")
+        server.folder("Taxes")
+        server.folder("Banking")
+
+        def make(**config) -> Harness:
+            account = make_config(tmp_path, **config).account("alice")
+            h = Harness(server, account, tmp_path, write=True)
+            h.run_sync()
+            return h
+
+        return make
+
+    @pytest.fixture
+    def h(self, make):
+        return make(
+            default_write={"protected_folders": ["Taxes"]},
+            alice_write={"protected_folders": ["Banking"]},
+        )
+
+    def test_move_files_an_unread_message(self, server, h):
+        uid = deliver(server, "INBOX", subject="file me")
+        h.run_sync()
+        mid = MailId("INBOX", 1, uid).encode()
+        out = h.service.move(mid, "Work")
+        assert (out["moved"], out["from_folder"], out["to_folder"]) == (True, "INBOX", "Work")
+        assert not server.folders["INBOX"].messages
+        [copy] = server.folders["Work"].messages.values()
+        assert copy.flags == set()  # still unread
+        assert h.service.get(out["new_id"])["headers"]["subject"] == "file me"
+        # The old id is gone from the index at once; sync picks up the new one.
+        assert h.index.get("INBOX", uid) is None
+
+    def test_writes_ask_sync_to_resync_both_folders(self, server, h, monkeypatch):
+        asked = []
+        monkeypatch.setattr(h.sync, "request_resync", lambda *names: asked.append(names))
+        uid = deliver(server, "INBOX")
+        h.service.archive(MailId("INBOX", 1, uid).encode())
+        assert asked == [("INBOX", "Archive")]
+
+    @pytest.mark.parametrize(
+        ("source", "token_protected"),
+        [
+            ("Taxes", ()),  # defaults
+            ("Banking", ()),  # account
+            ("Work", ("Work",)),  # token
+            ("INBOX", ("inbox",)),  # INBOX in any case
+        ],
+    )
+    def test_protected_source(self, server, make, source, token_protected):
+        h = make(
+            default_write={"protected_folders": ["Taxes"]},
+            alice_write={"protected_folders": ["Banking"]},
+            alice_special={"deleted_messages": True},
+        )
+        uid = deliver(server, source)
+        mid = MailId(source, 1, uid).encode()
+        server.commands.clear()
+        for call in (
+            lambda: h.service.move(mid, "Friends & Family", token_protected),
+            lambda: h.service.archive(mid, token_protected),
+            lambda: h.service.delete(mid, token_protected),
+        ):
+            with pytest.raises(ToolInputError, match="folder is protected"):
+                call()
+        assert self.no_write_sent(server)
+        assert uid in server.folders[source].messages
+
+    @pytest.mark.parametrize(
+        ("call", "token_protected"),
+        [
+            (lambda s, mid, tp: s.move(mid, "Taxes", tp), ()),
+            (lambda s, mid, tp: s.move(mid, "Work", tp), ("Work",)),
+            (lambda s, mid, tp: s.archive(mid, tp), ("Archive",)),
+            (lambda s, mid, tp: s.delete(mid, tp), ("Deleted Messages",)),
+        ],
+    )
+    def test_protected_destination(self, server, h, call, token_protected):
+        uid = deliver(server, "INBOX")
+        server.commands.clear()
+        with pytest.raises(ToolInputError, match="folder is protected"):
+            call(h.service, MailId("INBOX", 1, uid).encode(), token_protected)
+        assert self.no_write_sent(server)
+        assert uid in server.folders["INBOX"].messages
+
+    def test_token_protection_applies_only_to_that_token(self, server, h):
+        uid = deliver(server, "Work")
+        mid = MailId("Work", 1, uid).encode()
+        with pytest.raises(ToolInputError, match="protected"):
+            h.service.move(mid, "INBOX", ("Work",))
+        assert h.service.move(mid, "INBOX")["to_folder"] == "INBOX"
+
+    @pytest.mark.parametrize("folder", ["Private", "Nope"])
+    def test_destination_out_of_scope_or_missing(self, server, make, folder):
+        server.folder("Private")
+        h = make(alice_exclude=["Private"])
+        uid = deliver(server, "INBOX")
+        server.commands.clear()
+        with pytest.raises(ToolInputError, match=f"^unknown folder: {folder}$"):
+            h.service.move(MailId("INBOX", 1, uid).encode(), folder)
+        assert self.no_write_sent(server)
+
+    def test_hidden_special_folder_is_not_a_move_destination(self, server, h):
+        uid = deliver(server, "INBOX")
+        with pytest.raises(ToolInputError, match="unknown folder: Deleted Messages"):
+            h.service.move(MailId("INBOX", 1, uid).encode(), "Deleted Messages")
+
+    def test_move_to_the_same_folder(self, server, h):
+        uid = deliver(server, "INBOX")
+        server.commands.clear()
+        with pytest.raises(ToolInputError, match="already in that folder"):
+            h.service.move(MailId("INBOX", 1, uid).encode(), "INBOX")
+        assert self.no_write_sent(server)
+
+    def test_out_of_scope_source_is_unknown(self, server, h):
+        uid = deliver(server, "Junk")  # hidden by default
+        with pytest.raises(ToolInputError, match="unknown folder: Junk"):
+            h.service.delete(MailId("Junk", 1, uid).encode())
+
+    def test_delete_moves_to_hidden_deleted_messages(self, server, h):
+        uid = deliver(server, "INBOX", subject="bye")
+        server.folders["INBOX"].messages[uid].flags = {"\\Seen"}
+        out = h.service.delete(MailId("INBOX", 1, uid).encode())
+        assert out["to_folder"] == "Deleted Messages"
+        assert not server.folders["INBOX"].messages
+        [kept] = server.folders["Deleted Messages"].messages.values()
+        assert kept.flags == {"\\Seen"}  # flags unchanged; not marked deleted
+        assert decode_id(out["new_id"]) == MailId("Deleted Messages", 1, kept.uid)
+
+    def test_delete_from_deleted_messages(self, server, make):
+        h = make(alice_special={"deleted_messages": True})
+        uid = deliver(server, "Deleted Messages")
+        server.commands.clear()
+        with pytest.raises(ToolInputError, match="already in Deleted Messages"):
+            h.service.delete(MailId("Deleted Messages", 1, uid).encode())
+        assert "SELECT" not in self.sent(server)
+        assert uid in server.folders["Deleted Messages"].messages
+
+    def test_delete_from_a_differently_named_trash(self, server, make):
+        # iCloud marks Deleted Messages \Trash; a \Trash folder under another name counts too.
+        server.folder("Bin").special_use = "\\Trash"
+        server.folders["Deleted Messages"].special_use = None
+        h = make()
+        uid = deliver(server, "Bin")
+        with pytest.raises(ToolInputError, match="already in Deleted Messages"):
+            h.service.delete(MailId("Bin", 1, uid).encode())
+        inbox = deliver(server, "INBOX")
+        assert h.service.delete(MailId("INBOX", 1, inbox).encode())["to_folder"] == "Bin"
+
+    def test_delete_without_deleted_messages(self, server, h):
+        del server.folders["Deleted Messages"]
+        uid = deliver(server, "INBOX")
+        with pytest.raises(ToolInputError, match="Deleted Messages folder not found"):
+            h.service.delete(MailId("INBOX", 1, uid).encode())
+        assert uid in server.folders["INBOX"].messages
+
+    def test_archive_to_hidden_archive_folder(self, server, make):
+        h = make(alice_exclude=["Archive"])
+        uid = deliver(server, "INBOX")
+        server.folders["INBOX"].messages[uid].flags = {"\\Flagged"}
+        out = h.service.archive(MailId("INBOX", 1, uid).encode())
+        assert out["to_folder"] == "Archive"
+        [kept] = server.folders["Archive"].messages.values()
+        assert kept.flags == {"\\Flagged"}
+
+    def test_archive_already_archived(self, server, h):
+        uid = deliver(server, "Archive")
+        server.commands.clear()
+        with pytest.raises(ToolInputError, match="already in the archive folder"):
+            h.service.archive(MailId("Archive", 1, uid).encode())
+        assert self.no_write_sent(server)
+
+    def test_archive_folder_missing(self, server, h):
+        del server.folders["Archive"]
+        uid = deliver(server, "INBOX")
+        with pytest.raises(ToolInputError, match="archive folder not found"):
+            h.service.archive(MailId("INBOX", 1, uid).encode())
+        assert uid in server.folders["INBOX"].messages
+
+    def test_archive_folder_override(self, server, make):
+        server.folder("Old Mail")
+        h = make(alice_write={"archive_folder": "Old Mail"})
+        uid = deliver(server, "INBOX")
+        assert h.service.archive(MailId("INBOX", 1, uid).encode())["to_folder"] == "Old Mail"
+        assert len(server.folders["Old Mail"].messages) == 1
+        assert not server.folders["Archive"].messages
+
+    def test_stale_and_bogus_ids(self, server, h):
+        uid = deliver(server, "INBOX")
+        with pytest.raises(ToolInputError, match="stale"):
+            h.service.move(MailId("INBOX", 7, uid).encode(), "Work")
+        with pytest.raises(ToolInputError, match="not found"):
+            h.service.move(MailId("INBOX", 1, 999).encode(), "Work")
+        with pytest.raises(ToolInputError, match="malformed"):
+            h.service.move("%%%", "Work")
+        assert uid in server.folders["INBOX"].messages
+
+    def test_reads_after_a_write_use_a_read_only_connection(self, server, h):
+        uid = deliver(server, "INBOX")
+        out = h.service.move(MailId("INBOX", 1, uid).encode(), "Work")
+        server.commands.clear()
+        h.service.get(out["new_id"])
+        assert {c[0] for c in server.commands} <= ALLOWED_IMAP_COMMANDS
+        assert "SELECT" not in self.sent(server)
+
+    def test_without_a_writer_nothing_is_written(self, server, harness):
+        uid = deliver(server, "INBOX")
+        harness.run_sync()
+        with pytest.raises(ToolInputError, match="not enabled"):
+            harness.service.move(MailId("INBOX", 1, uid).encode(), "Work")
+        assert self.no_write_sent(server)
+
+
+def test_sync_resyncs_requested_folders(server, harness):
+    uid = deliver(server, "INBOX", subject="moving")
+    harness.run_sync()
+    server.move("INBOX", uid, "Work")  # as a write would, behind the index's back
+    harness.sync.request_resync("INBOX", "Work", "Deleted Messages")  # last one is hidden
+    harness.sync.interval = 0.05
+    server.commands.clear()
+    harness.sync._wait_for_next_pass(harness._client)
+    assert [m.subject for m in harness.index.search(folders=["Work"])] == ["moving"]
+    assert harness.index.get("INBOX", uid) is None
+    examined = [c[1] for c in server.commands if c[0] == "EXAMINE"]
+    assert '"Deleted Messages"' not in examined  # out of scope: never synced
 
 
 def test_fake_records_capability_on_connect():

@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import re
 from pathlib import Path
@@ -13,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 OWNER = "@mwklein"
 # Owned before they exist: the only modules allowed to change mail (ADR-0004), created by the
 # add-mail-write-core change. Remove a path from here once it exists.
-PLANNED_PATHS = {"/src/pv_icloud/mail/imap_write.py", "/src/pv_icloud/mail/smtp.py"}
+PLANNED_PATHS = {"/src/pv_icloud/mail/smtp.py"}
 
 
 def _codeowners() -> dict[str, list[str]]:
@@ -85,6 +86,173 @@ def test_write_rule_is_summarised_and_documented() -> None:
     security = (ROOT / "SECURITY.md").read_text()
     assert "Read-only by default" in security and "PV_ICLOUD_MAIL_WRITE=enabled" in security
     assert (ROOT / "docs" / "adr" / "0004-opt-in-mail-write.md").exists()
+
+
+# --- IMAP and DAV call sites (CLAUDE.md hard rules, ADR-0004) ----------------------------
+#
+# These inspect the code's call sites rather than its text: SQL `DELETE` and the response
+# code `COPYUID` are legitimate words elsewhere.
+
+MAIL_DIR = ROOT / "src" / "pv_icloud" / "mail"
+WRITE_MODULE = "imap_write.py"
+# imaplib methods that send a command able to change mail or folders, flagged on any
+# receiver. Names that are also everyday Python methods (list.append, dict.copy, our own
+# ImapClient.close(), which logs out) are flagged only on an imaplib connection.
+_FORBIDDEN_METHODS = frozenset(
+    {"store", "expunge", "move", "rename", "subscribe", "unsubscribe", "xatom"}
+    | {"_simple_command", "_command"}
+)
+_FORBIDDEN_ON_CONN = frozenset({"copy", "append", "create", "delete", "close"})
+_UID_READ = frozenset({"SEARCH", "FETCH"})
+_UID_WRITE = frozenset({"COPY", "STORE", "EXPUNGE"})
+
+
+def _calls(path: Path) -> list[ast.Call]:
+    tree = ast.parse(path.read_text(), filename=str(path))
+    return [n for n in ast.walk(tree) if isinstance(n, ast.Call)]
+
+
+def _method(call: ast.Call) -> str | None:
+    return call.func.attr if isinstance(call.func, ast.Attribute) else None
+
+
+def _receiver_is_conn(call: ast.Call) -> bool:
+    """True for `conn.x()`, `self.conn.x()`, `client.conn.x()` and `self._c().x()`."""
+    assert isinstance(call.func, ast.Attribute)
+    recv = call.func.value
+    if isinstance(recv, ast.Call):
+        return isinstance(recv.func, ast.Attribute) and recv.func.attr == "_c"
+    name = recv.attr if isinstance(recv, ast.Attribute) else getattr(recv, "id", "")
+    return name.endswith("conn")
+
+
+def _const(node: ast.AST) -> str | None:
+    return node.value if isinstance(node, ast.Constant) and isinstance(node.value, str) else None
+
+
+def _is_single_uid(node: ast.AST) -> bool:
+    """`str(<name>)`: one integer UID, never a set or a range."""
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "str"
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Name | ast.Attribute)
+    )
+
+
+def _imap_violations(path: Path) -> list[str]:
+    in_write = path.name == WRITE_MODULE
+    out: list[str] = []
+    for call in _calls(path):
+        method = _method(call)
+        where = f"{path.name}:{call.lineno}"
+        on_conn = method in _FORBIDDEN_ON_CONN and _receiver_is_conn(call)
+        if method in _FORBIDDEN_METHODS or on_conn:
+            out.append(f"{where}: .{method}() is forbidden")
+        elif method == "select":
+            readonly = {k.arg: k.value for k in call.keywords}.get("readonly")
+            examine = isinstance(readonly, ast.Constant) and readonly.value is True
+            if not examine and not in_write:
+                out.append(f"{where}: SELECT outside {WRITE_MODULE}")
+        elif method == "uid":
+            out.extend(_uid_violations(call, where, in_write))
+    return out
+
+
+def _uid_violations(call: ast.Call, where: str, in_write: bool) -> list[str]:
+    command = _const(call.args[0]) if call.args else None
+    args = call.args[1:]
+    if command is None:
+        return [f"{where}: UID command must be a string literal"]
+    command = command.upper()
+    if command in _UID_READ:
+        # After SELECT a non-PEEK body fetch would set \Seen: the write module fetches flags.
+        flags_only = len(args) == 2 and _is_single_uid(args[0]) and _const(args[1]) == "(UID FLAGS)"
+        if command == "FETCH" and in_write and not flags_only:
+            return [f"{where}: {WRITE_MODULE} may only UID FETCH <uid> (UID FLAGS)"]
+        return []
+    if command not in _UID_WRITE:
+        return [f"{where}: UID {command} is forbidden"]
+    if not in_write:
+        return [f"{where}: UID {command} outside {WRITE_MODULE}"]
+    if not args or not _is_single_uid(args[0]):
+        return [f"{where}: UID {command} must name exactly one UID as str(uid)"]
+    if command == "STORE" and [_const(a) for a in args[1:]] != ["+FLAGS.SILENT", "(\\Deleted)"]:
+        return [f"{where}: UID STORE may only add \\Deleted silently"]
+    if command == "EXPUNGE" and len(args) != 1:
+        return [f"{where}: UID EXPUNGE takes exactly one UID"]
+    return []
+
+
+def test_imap_call_sites_follow_the_write_rules() -> None:
+    files = sorted(MAIL_DIR.glob("*.py"))
+    assert MAIL_DIR / "imap.py" in files
+    violations = [v for path in files for v in _imap_violations(path)]
+    assert violations == []
+
+
+def test_imap_write_module_exists_and_uses_every_write_form() -> None:
+    # Guards the checks above against passing vacuously (e.g. after a rename).
+    calls = _calls(MAIL_DIR / WRITE_MODULE)
+    uid_commands = {_const(c.args[0]) for c in calls if _method(c) == "uid" and c.args}
+    assert {"COPY", "STORE", "EXPUNGE", "FETCH"} <= uid_commands
+    assert any(_method(c) == "select" and not c.keywords for c in calls)
+
+
+@pytest.mark.parametrize(
+    ("source", "message"),
+    [
+        ("conn.store('1', '+FLAGS', '(\\\\Seen)')", ".store() is forbidden"),
+        ("conn.expunge()", ".expunge() is forbidden"),
+        ("self.conn.close()", ".close() is forbidden"),
+        ("self._c().copy('1', 'X')", ".copy() is forbidden"),
+        ("client.conn.delete('X')", ".delete() is forbidden"),
+        ("conn.select('INBOX')", "SELECT outside"),
+        ("conn.uid('MOVE', '1', 'X')", "UID MOVE is forbidden"),
+        ("conn.uid(cmd, '1')", "string literal"),
+        ("conn.uid('STORE', str(uid), '+FLAGS.SILENT', '(\\\\Deleted)')", "outside"),
+    ],
+)
+def test_imap_policy_catches_read_path_violations(tmp_path: Path, source: str, message: str):
+    path = tmp_path / "imap.py"
+    path.write_text(source + "\n")
+    [violation] = _imap_violations(path)
+    assert message in violation
+
+
+@pytest.mark.parametrize(
+    ("source", "message"),
+    [
+        ("conn.uid('COPY', '1:5', dest)", "exactly one UID"),
+        ("conn.uid('COPY', '1,2', dest)", "exactly one UID"),
+        ("conn.uid('STORE', str(uid), '+FLAGS', '(\\\\Deleted)')", "only add \\Deleted"),
+        ("conn.uid('STORE', str(uid), '-FLAGS.SILENT', '(\\\\Deleted)')", "only add \\Deleted"),
+        ("conn.uid('STORE', str(uid), '+FLAGS.SILENT', '(\\\\Seen)')", "only add \\Deleted"),
+        ("conn.uid('EXPUNGE', uid_set(uids))", "exactly one UID"),
+        ("conn.uid('FETCH', str(uid), '(BODY[])')", "UID FETCH <uid> (UID FLAGS)"),
+        ("conn.expunge()", ".expunge() is forbidden"),
+        ("conn.append('Drafts', None, None, b'')", ".append() is forbidden"),
+    ],
+)
+def test_imap_policy_catches_write_path_violations(tmp_path: Path, source: str, message: str):
+    path = tmp_path / WRITE_MODULE
+    path.write_text(source + "\n")
+    [violation] = _imap_violations(path)
+    assert message in violation
+
+
+def test_dav_sends_only_propfind_and_report() -> None:
+    from pv_icloud.dav import READ_METHODS
+
+    assert frozenset({"PROPFIND", "REPORT"}) == READ_METHODS
+    dav_files = [ROOT / "src" / "pv_icloud" / "dav.py"]
+    dav_files += sorted((ROOT / "src" / "pv_icloud" / "cal").glob("*.py"))
+    dav_files += sorted((ROOT / "src" / "pv_icloud" / "contacts").glob("*.py"))
+    for path in dav_files:
+        for call in _calls(path):
+            if _method(call) == "_request":
+                assert _const(call.args[0]) in READ_METHODS, f"{path.name}:{call.lineno}"
 
 
 def test_claude_md_states_checks() -> None:

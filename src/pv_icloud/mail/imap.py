@@ -6,7 +6,8 @@
 Only read-only commands are ever issued: CAPABILITY (sent by imaplib on connect), LOGIN,
 ENABLE, LIST, STATUS, EXAMINE, UID SEARCH, UID FETCH with BODY.PEEK, NOOP, IDLE, LOGOUT.
 There is deliberately no select(readonly=False), STORE, COPY, MOVE, EXPUNGE or APPEND anywhere
-in this module.
+in this module. Mail writes (ADR-0004) live only in mail/imap_write.py, on connections from
+ImapPool.write_connection() that never return to the pool.
 """
 
 from __future__ import annotations
@@ -148,9 +149,13 @@ class ImapClient:
         self.selected = None
 
     def list_folders(self) -> list[str]:
+        return list(self.folder_attributes())
+
+    def folder_attributes(self) -> dict[str, frozenset[str]]:
+        """Selectable folders (LIST) with their attributes, lower-cased (e.g. `\\trash`)."""
         typ, data = self._c().list()
         _check(typ, data, "LIST")
-        names: list[str] = []
+        folders: dict[str, frozenset[str]] = {}
         for item in data:
             if item is None:
                 continue
@@ -165,10 +170,11 @@ class ImapClient:
                     log.warning("unparsable LIST line: %r", item)
                     continue
                 flags, raw_name = m.group("flags"), m.group("name")
-            if b"\\noselect" in flags.lower() or b"\\nonexistent" in flags.lower():
+            attrs = frozenset(flags.decode("ascii", errors="replace").lower().split())
+            if "\\noselect" in attrs or "\\nonexistent" in attrs:
                 continue
-            names.append(utf7.decode(_unquote(raw_name)))
-        return names
+            folders[utf7.decode(_unquote(raw_name))] = attrs
+        return folders
 
     def status(self, folder: str) -> FolderStatus:
         typ, data = self._c().status(quote(folder), "(MESSAGES UIDNEXT UIDVALIDITY HIGHESTMODSEQ)")
@@ -325,6 +331,24 @@ class ImapPool:
             if client is not None and not self._closed:
                 self._free.put(client)
             elif client is not None:
+                client.close()
+            self._slots.release()
+
+    @contextlib.contextmanager
+    def write_connection(self, timeout: float = 30.0) -> Iterator[ImapClient]:
+        """A fresh connection for one mail write (mail/imap_write.py), logged out afterwards.
+
+        It takes one of the pool's slots but is never put back, so no read ever runs on a
+        connection that has SELECTed a folder read-write.
+        """
+        if not self._slots.acquire(timeout=timeout):
+            raise ImapError("timed out waiting for an IMAP connection")
+        client: ImapClient | None = None
+        try:
+            client = self.new_client()
+            yield client
+        finally:
+            if client is not None:
                 client.close()
             self._slots.release()
 

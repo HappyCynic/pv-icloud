@@ -3,7 +3,14 @@
 
 """In-memory stand-in for an imaplib.IMAP4 connection (the subset pv_icloud uses).
 
-It enforces read-only use: EXAMINE only, BODY.PEEK only; anything else raises.
+It enforces the read and write rules (CLAUDE.md, ADR-0004). Reads: EXAMINE, and BODY.PEEK
+or `(UID FLAGS)` fetches only. Writes, only on a SELECTed folder: `UID COPY` of one UID
+(answered with COPYUID), `UID STORE` of one UID with exactly `+FLAGS.SILENT (\\Deleted)`, and
+`UID EXPUNGE` of one UID. Every other form (STORE, COPY, EXPUNGE, CLOSE, MOVE, APPEND, UID
+sets or ranges, other flags) raises, so a test fails if the server ever sends one.
+
+Like iCloud (checked 2026-10-12) it advertises UIDPLUS and UNSELECT but not MOVE, marks
+`Deleted Messages` as \\Trash, and gives `Archive` and `Drafts` no special-use attribute.
 """
 
 from __future__ import annotations
@@ -35,12 +42,19 @@ class FakeFolder:
     modseq: int = 1
     messages: dict[int, FakeMessage] = field(default_factory=dict)
     noselect: bool = False
+    special_use: str | None = None  # LIST attribute such as \Trash
+
+
+# iCloud's special-use attributes; Archive and Drafts have none (checked 2026-10-12).
+SPECIAL_USE = {"Deleted Messages": "\\Trash", "Sent Messages": "\\Sent"}
+CAPABILITIES = (
+    "IMAP4REV1", "IDLE", "CONDSTORE", "QRESYNC", "ESEARCH", "ENABLE", "UIDPLUS", "UNSELECT",
+)  # fmt: skip
+_ONE_UID = re.compile(r"[1-9][0-9]*")
 
 
 class FakeServer:
-    def __init__(
-        self, capabilities=("IMAP4REV1", "IDLE", "CONDSTORE", "QRESYNC", "ESEARCH", "ENABLE")
-    ):
+    def __init__(self, capabilities=CAPABILITIES):
         self.folders: dict[str, FakeFolder] = {}
         self.capabilities = tuple(capabilities)
         self.commands: list[tuple] = []
@@ -48,10 +62,15 @@ class FakeServer:
         self.password = "app-pw"
         self.connections = 0
         self.fail_examine: set[str] = set()
+        # Write-path failure switches.
+        self.copyuid = "ok"  # "ok", "omit" (no COPYUID) or "mismatch" (names another UID)
+        self.fail_copy = False
+        self.fail_store = False
+        self.fail_expunge = False
 
     def folder(self, name: str) -> FakeFolder:
         if name not in self.folders:
-            self.folders[name] = FakeFolder(name)
+            self.folders[name] = FakeFolder(name, special_use=SPECIAL_USE.get(name))
         return self.folders[name]
 
     def deliver(self, folder: str, raw: bytes, date: dt.date | None = None) -> int:
@@ -187,6 +206,8 @@ class FakeConn:
         out = []
         for f in self.s.folders.values():
             flags = "\\Noselect" if f.noselect else "\\HasNoChildren"
+            if f.special_use:
+                flags += " " + f.special_use
             out.append(f'({flags}) "/" "{utf7.encode(f.name)}"'.encode())
         return "OK", out
 
@@ -205,14 +226,13 @@ class FakeConn:
         return "OK", [line.encode()]
 
     def select(self, mailbox="INBOX", readonly=False):
-        if not readonly:
-            raise AssertionError("SELECT (read-write) is forbidden; use EXAMINE")
-        self._log("EXAMINE", mailbox)
+        self._log("EXAMINE" if readonly else "SELECT", mailbox)
         f = self._folder(mailbox)
         if f is None or f.noselect or f.name in self.s.fail_examine:
             self.selected = None
             return "NO", [b"Mailbox does not exist"]
         self.selected = f
+        self.readonly = readonly
         self._responses = {
             "UIDVALIDITY": [str(f.uidvalidity).encode()],
             "UIDNEXT": [str(f.uidnext).encode()],
@@ -235,7 +255,68 @@ class FakeConn:
             return self._search(args)
         if command == "FETCH":
             return self._fetch(*args)
-        raise AssertionError(f"UID {command} is forbidden")
+        if command not in ("COPY", "STORE", "EXPUNGE"):
+            raise AssertionError(f"UID {command} is forbidden")
+        if self.readonly:
+            raise AssertionError(f"UID {command} needs a SELECTed (read-write) folder")
+        if not args or not _ONE_UID.fullmatch(args[0]):
+            raise AssertionError(f"UID {command} must name exactly one UID, got {args[:1]}")
+        if command == "COPY":
+            return self._copy(int(args[0]), *args[1:])
+        if command == "STORE":
+            return self._store(int(args[0]), *args[1:])
+        return self._expunge(int(args[0]), *args[1:])
+
+    def _copy(self, uid, mailbox):
+        dest = self._folder(mailbox)
+        msg = self.selected.messages.get(uid)
+        if self.s.fail_copy or dest is None:
+            return "NO", [b"[TRYCREATE] COPY failed"]
+        if msg is None:  # RFC 9051: copying a UID that is gone is not an error
+            return "OK", [b"COPY completed"]
+        new = self.s.deliver(dest.name, msg.raw, msg.internaldate)
+        dest.messages[new].flags = set(msg.flags)
+        src = uid + 1 if self.s.copyuid == "mismatch" else uid
+        if self.s.copyuid != "omit":
+            self._responses["COPYUID"] = [f"{dest.uidvalidity} {src} {new}".encode()]
+        return "OK", [b"COPY completed"]
+
+    def _store(self, uid, op, flags):
+        if (op, flags) != ("+FLAGS.SILENT", "(\\Deleted)"):
+            raise AssertionError(f"UID STORE {op} {flags} is forbidden")
+        if self.s.fail_store:
+            return "NO", [b"STORE failed"]
+        msg = self.selected.messages.get(uid)
+        if msg is not None:
+            msg.flags.add("\\Deleted")
+            self.selected.modseq += 1
+        return "OK", [None]
+
+    def _expunge(self, uid, *rest):
+        if rest:
+            raise AssertionError(f"UID EXPUNGE takes one UID, got {rest}")
+        if self.s.fail_expunge:
+            return "NO", [b"EXPUNGE failed"]
+        msg = self.selected.messages.get(uid)
+        if msg is not None and "\\Deleted" in msg.flags:
+            self.s.expunge(self.selected.name, uid)
+        return "OK", [None]
+
+    # Commands that must never be sent: plain STORE/COPY/EXPUNGE, CLOSE (expunges every
+    # \Deleted message), MOVE, APPEND and folder changes.
+    def _forbidden(self, name):
+        def refuse(*args, **kwargs):
+            raise AssertionError(f"{name} is forbidden")
+
+        return refuse
+
+    def __getattr__(self, name):
+        if name in (
+            "store", "copy", "expunge", "close", "move", "append", "create", "delete", "rename",
+            "subscribe", "unsubscribe", "xatom", "_simple_command", "_command",
+        ):  # fmt: skip
+            return self._forbidden(name.upper())
+        raise AttributeError(name)
 
     def _search(self, args):
         tokens = [m.group(0) for a in args for m in _ARG_RE.finditer(a)]
@@ -261,6 +342,8 @@ class FakeConn:
         return "OK", [" ".join(str(m.uid) for m in msgs).encode()]
 
     def _fetch(self, uidset, items):
+        if items == "(UID FLAGS)":
+            return self._fetch_flags(uidset)
         m = _PEEK_RE.search(items)
         if "BODY[" in items.replace("BODY.PEEK[", "") or not m:
             raise AssertionError(f"non-PEEK fetch is forbidden: {items}")
@@ -287,6 +370,16 @@ class FakeConn:
             out.append((head.encode(), body))
             out.append(b")")
         return "OK", out
+
+    def _fetch_flags(self, uidset):
+        if not _ONE_UID.fullmatch(uidset):
+            raise AssertionError(f"flag fetches name one UID, got {uidset}")
+        seqs = {uid: n + 1 for n, uid in enumerate(sorted(self.selected.messages))}
+        msg = self.selected.messages.get(int(uidset))
+        if msg is None:
+            return "OK", [None]
+        flags = " ".join(sorted(msg.flags))
+        return "OK", [f"{seqs[msg.uid]} (UID {msg.uid} FLAGS ({flags}))".encode()]
 
     @contextlib.contextmanager
     def idle(self, duration=None):
