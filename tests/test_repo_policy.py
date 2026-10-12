@@ -102,9 +102,11 @@ _FORBIDDEN_METHODS = frozenset(
     {"store", "expunge", "move", "rename", "subscribe", "unsubscribe", "xatom"}
     | {"_simple_command", "_command"}
 )
-_FORBIDDEN_ON_CONN = frozenset({"copy", "append", "create", "delete", "close"})
+_FORBIDDEN_ON_CONN = frozenset({"copy", "create", "delete", "close"})
 _UID_READ = frozenset({"SEARCH", "FETCH"})
 _UID_WRITE = frozenset({"COPY", "STORE", "EXPUNGE"})
+# The only flags a new message may be created with: a draft (add-mail-draft).
+_APPEND_FLAGS = "(\\Draft \\Seen)"
 
 
 def _calls(path: Path) -> list[ast.Call]:
@@ -157,7 +159,19 @@ def _imap_violations(path: Path) -> list[str]:
                 out.append(f"{where}: SELECT outside {WRITE_MODULE}")
         elif method == "uid":
             out.extend(_uid_violations(call, where, in_write))
+        elif method == "append" and _receiver_is_conn(call):
+            out.extend(_append_violations(call, where, in_write))
     return out
+
+
+def _append_violations(call: ast.Call, where: str, in_write: bool) -> list[str]:
+    """APPEND only creates a draft: in the write module, flags exactly `(\\Draft \\Seen)`."""
+    if not in_write:
+        return [f"{where}: APPEND outside {WRITE_MODULE}"]
+    flags = call.args[1] if len(call.args) > 1 else None
+    if len(call.args) != 4 or call.keywords or flags is None or _const(flags) != _APPEND_FLAGS:
+        return [f"{where}: APPEND may only save a draft with flags {_APPEND_FLAGS}"]
+    return []
 
 
 def _uid_violations(call: ast.Call, where: str, in_write: bool) -> list[str]:
@@ -198,6 +212,8 @@ def test_imap_write_module_exists_and_uses_every_write_form() -> None:
     uid_commands = {_const(c.args[0]) for c in calls if _method(c) == "uid" and c.args}
     assert {"COPY", "STORE", "EXPUNGE", "FETCH"} <= uid_commands
     assert any(_method(c) == "select" and not c.keywords for c in calls)
+    appends = [c for c in calls if _method(c) == "append" and _receiver_is_conn(c)]
+    assert len(appends) == 1
 
 
 @pytest.mark.parametrize(
@@ -212,6 +228,8 @@ def test_imap_write_module_exists_and_uses_every_write_form() -> None:
         ("conn.uid('MOVE', '1', 'X')", "UID MOVE is forbidden"),
         ("conn.uid(cmd, '1')", "string literal"),
         ("conn.uid('STORE', str(uid), '+FLAGS.SILENT', '(\\\\Deleted)')", "outside"),
+        ("conn.append('Drafts', '(\\\\Draft \\\\Seen)', None, msg)", "APPEND outside"),
+        ("self._c().append('Drafts', '(\\\\Draft \\\\Seen)', None, msg)", "APPEND outside"),
     ],
 )
 def test_imap_policy_catches_read_path_violations(tmp_path: Path, source: str, message: str):
@@ -232,7 +250,13 @@ def test_imap_policy_catches_read_path_violations(tmp_path: Path, source: str, m
         ("conn.uid('EXPUNGE', uid_set(uids))", "exactly one UID"),
         ("conn.uid('FETCH', str(uid), '(BODY[])')", "UID FETCH <uid> (UID FLAGS)"),
         ("conn.expunge()", ".expunge() is forbidden"),
-        ("conn.append('Drafts', None, None, b'')", ".append() is forbidden"),
+        ("conn.append('Drafts', None, None, b'')", "only save a draft"),
+        ("conn.append('Drafts', '(\\\\Seen)', None, msg)", "only save a draft"),
+        ("conn.append('Drafts', '(\\\\Draft)', None, msg)", "only save a draft"),
+        ("conn.append('Drafts', '(\\\\Draft \\\\Seen \\\\Flagged)', None, msg)", "only save"),
+        ("conn.append('Drafts', flags, None, msg)", "only save a draft"),
+        ("conn.append('Drafts')", "only save a draft"),
+        ("conn.append('Drafts', flags=FLAGS, date_time=None, message=msg)", "only save"),
     ],
 )
 def test_imap_policy_catches_write_path_violations(tmp_path: Path, source: str, message: str):
@@ -240,6 +264,15 @@ def test_imap_policy_catches_write_path_violations(tmp_path: Path, source: str, 
     path.write_text(source + "\n")
     [violation] = _imap_violations(path)
     assert message in violation
+
+
+def test_imap_policy_allows_saving_a_draft(tmp_path: Path) -> None:
+    path = tmp_path / WRITE_MODULE
+    path.write_text("conn.append(quote(DRAFTS), '(\\\\Draft \\\\Seen)', None, message)\n")
+    assert _imap_violations(path) == []
+    # An everyday list.append() is not an IMAP command.
+    path.write_text("rows.append(row)\n")
+    assert _imap_violations(path) == []
 
 
 def test_dav_sends_only_propfind_and_report() -> None:

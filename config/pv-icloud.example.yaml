@@ -25,9 +25,11 @@ defaults:
     # docs/adr/0004-opt-in-mail-write.md. These settings have no effect until then.
     write:
       # Nothing can be moved, archived or deleted into or out of these folders. An account's
-      # own list adds to this one; a token's `protected_folders` adds to both.
+      # own list adds to this one; a token's `protected_folders` adds to both. Drafting is
+      # governed by the `draft` grant, not by this list.
       protected_folders: []
       archive_folder: Archive  # where mail_archive moves messages (found by name)
+      # send_from: someone@example.com  # From of drafts; unset: Mail fills in the sender
   calendar:
     # Calendar display names, globs allowed; applies to subscribed calendars too.
     calendars: { include: "*", exclude: [] }
@@ -48,7 +50,9 @@ accounts:
     tokens:
       # Read-only, as every token is unless it lists `mail_write`. With
       # PV_ICLOUD_MAIL_WRITE=enabled a token may be granted, each on its own:
-      #   mail_write: [move, archive, delete]   # delete only moves to Deleted Messages
+      #   mail_write: [move, archive, delete, draft]
+      #                       # delete only moves to Deleted Messages; draft saves to Drafts
+      #                       # for a person to review and send (never sent by pv-icloud)
       #   protected_folders: [Work]             # added to the account's protected folders
       #   max_writes_per_hour: 30               # default 30; held in memory
       - { label: laptop, sha256: "REPLACE_ME" }

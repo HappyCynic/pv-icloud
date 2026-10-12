@@ -6,8 +6,10 @@
 It enforces the read and write rules (CLAUDE.md, ADR-0004). Reads: EXAMINE, and BODY.PEEK
 or `(UID FLAGS)` fetches only. Writes, only on a SELECTed folder: `UID COPY` of one UID
 (answered with COPYUID), `UID STORE` of one UID with exactly `+FLAGS.SILENT (\\Deleted)`, and
-`UID EXPUNGE` of one UID. Every other form (STORE, COPY, EXPUNGE, CLOSE, MOVE, APPEND, UID
-sets or ranges, other flags) raises, so a test fails if the server ever sends one.
+`UID EXPUNGE` of one UID. A new message only with `APPEND <folder> (\\Draft \\Seen)` (a draft,
+answered with APPENDUID). Every other form (STORE, COPY, EXPUNGE, CLOSE, MOVE, APPEND with
+other flags, UID sets or ranges, other flags) raises, so a test fails if the server ever
+sends one.
 
 Like iCloud (checked 2026-10-12) it advertises UIDPLUS and UNSELECT but not MOVE, marks
 `Deleted Messages` as \\Trash, and gives `Archive` and `Drafts` no special-use attribute.
@@ -67,6 +69,8 @@ class FakeServer:
         self.fail_copy = False
         self.fail_store = False
         self.fail_expunge = False
+        self.appenduid = "ok"  # "ok" or "omit" (saved, but no APPENDUID)
+        self.fail_append = False
 
     def folder(self, name: str) -> FakeFolder:
         if name not in self.folders:
@@ -302,8 +306,26 @@ class FakeConn:
             self.s.expunge(self.selected.name, uid)
         return "OK", [None]
 
+    def append(self, mailbox, flags, date_time, message):
+        """imaplib's APPEND. Only a draft: exactly `(\\Draft \\Seen)`, no date, one message."""
+        self._log("APPEND", mailbox, flags)
+        if flags != "(\\Draft \\Seen)" or date_time is not None:
+            raise AssertionError(f"APPEND {flags} {date_time} is forbidden")
+        if not isinstance(message, bytes) or not message:
+            raise AssertionError("APPEND needs one message as bytes")
+        dest = self._folder(mailbox)
+        if self.s.fail_append or dest is None or dest.noselect:
+            return "NO", [b"[TRYCREATE] APPEND failed"]
+        # imaplib maps bare LF to CRLF before sending; store what iCloud would receive.
+        raw = re.sub(rb"\r?\n", b"\r\n", message)
+        uid = self.s.deliver(dest.name, raw)
+        dest.messages[uid].flags = {"\\Draft", "\\Seen"}
+        if self.s.appenduid == "ok":
+            self._responses["APPENDUID"] = [f"{dest.uidvalidity} {uid}".encode()]
+        return "OK", [b"APPEND completed"]
+
     # Commands that must never be sent: plain STORE/COPY/EXPUNGE, CLOSE (expunges every
-    # \Deleted message), MOVE, APPEND and folder changes.
+    # \Deleted message), MOVE and folder changes.
     def _forbidden(self, name):
         def refuse(*args, **kwargs):
             raise AssertionError(f"{name} is forbidden")
@@ -312,7 +334,7 @@ class FakeConn:
 
     def __getattr__(self, name):
         if name in (
-            "store", "copy", "expunge", "close", "move", "append", "create", "delete", "rename",
+            "store", "copy", "expunge", "close", "move", "create", "delete", "rename",
             "subscribe", "unsubscribe", "xatom", "_simple_command", "_command",
         ):  # fmt: skip
             return self._forbidden(name.upper())

@@ -14,9 +14,18 @@ guarded move, for exactly one message, on a fresh connection that is logged out 
 
 A message is removed from its source only after its copy in the destination is confirmed.
 iCloud does not advertise MOVE, and UID EXPUNGE and COPYUID both come from UIDPLUS, so
-without UIDPLUS nothing is attempted. Nothing else that changes mail is ever sent: no plain
-STORE, COPY or EXPUNGE, no CLOSE (it expunges every \\Deleted message in the folder), no MOVE,
-no UID sets or ranges, no other flags. tests/test_repo_policy.py enforces this.
+without UIDPLUS nothing is attempted.
+
+mail_draft creates one new message, also on a fresh connection, with no SELECT:
+
+    APPEND "Drafts" (\\Draft \\Seen) {literal}   (APPENDUID gives the new id)
+
+Drafts is found by name (iCloud gives it no special-use attribute). Without UIDPLUS, which
+provides APPENDUID, nothing is attempted.
+
+Nothing else that changes mail is ever sent: no plain STORE, COPY or EXPUNGE, no CLOSE (it
+expunges every \\Deleted message in the folder), no MOVE, no UID sets or ranges, no other
+flags, no APPEND with other flags. tests/test_repo_policy.py enforces this.
 """
 
 from __future__ import annotations
@@ -53,6 +62,13 @@ EXPUNGE_FAILED = (
     "the message was copied, but removing it from its source failed: it is in the "
     "destination folder and may still be in its source folder, marked deleted"
 )
+DRAFTS_NAME = "Drafts"
+DRAFT_NO_UIDPLUS = (
+    "this iCloud server cannot report the new draft's id (no UIDPLUS); nothing was saved"
+)
+DRAFTS_NOT_FOUND = "Drafts folder not found; nothing was saved"
+APPEND_FAILED = "saving the draft failed; nothing was saved"
+APPEND_LOST = "the connection failed while saving the draft; it may or may not have been saved"
 
 # Folder name -> its LIST attributes, lower-cased; given to the destination resolver.
 Folders = Mapping[str, frozenset[str]]
@@ -64,6 +80,12 @@ class Moved:
     from_folder: str
     to_folder: str
     new_id: MailId  # from COPYUID, so always known
+
+
+@dataclass(frozen=True)
+class Appended:
+    folder: str
+    new_id: MailId | None  # None when the server saved the draft without APPENDUID
 
 
 def find_trash(folders: Folders) -> str | None:
@@ -102,8 +124,17 @@ def _copied_uid(codes: list | None, uid: int, uidvalidity: int) -> int | None:
     return None
 
 
+def _appended_uid(codes: list | None) -> tuple[int, int] | None:
+    """(uidvalidity, uid) if an APPENDUID names exactly one UID."""
+    for code in codes or []:
+        parts = code.split() if isinstance(code, bytes) else []
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            return int(parts[0]), int(parts[1])
+    return None
+
+
 class MailWriter:
-    """Guarded single-message moves for one account."""
+    """Guarded single-message moves and draft saving for one account."""
 
     def __init__(self, pool: ImapPool):
         self.pool = pool
@@ -163,3 +194,28 @@ class MailWriter:
             if typ != "OK":
                 raise WriteFailed(EXPUNGE_FAILED)
         return Moved(mid.folder, dest, MailId(dest, dest_uidvalidity, new_uid))
+
+    def append_draft(self, message: bytes) -> Appended:
+        """Save one new message in Drafts, flagged \\Draft and \\Seen. Changes nothing else."""
+        with self.pool.write_connection() as client:
+            if "UIDPLUS" not in client.capabilities:
+                raise WriteFailed(DRAFT_NO_UIDPLUS)
+            if DRAFTS_NAME not in client.folder_attributes():  # by name, even if hidden
+                raise ToolInputError(DRAFTS_NOT_FOUND)
+            conn = client.conn
+            assert conn is not None
+
+            conn.response("APPENDUID")  # drop any stale response code before APPEND
+            try:
+                typ, data = conn.append(quote(DRAFTS_NAME), "(\\Draft \\Seen)", None, message)
+                codes = conn.response("APPENDUID")[1]
+            except ImapErrors as exc:
+                raise WriteFailed(APPEND_LOST) from exc
+            if typ != "OK":
+                raise WriteFailed(APPEND_FAILED)
+        # Saved. A missing APPENDUID is not a failure: retrying would make a duplicate.
+        appended = _appended_uid(codes)
+        if appended is None:
+            log.warning("draft saved without APPENDUID; its id is unknown")
+            return Appended(DRAFTS_NAME, None)
+        return Appended(DRAFTS_NAME, MailId(DRAFTS_NAME, *appended))

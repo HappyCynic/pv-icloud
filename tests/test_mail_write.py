@@ -57,11 +57,45 @@ class TestFakeWriteRules:
         return c
 
     @pytest.mark.parametrize(
-        "method", ["store", "copy", "expunge", "close", "move", "append", "create", "delete"]
+        "method", ["store", "copy", "expunge", "close", "move", "create", "delete"]
     )
     def test_plain_commands_are_refused(self, conn, method):
         with pytest.raises(AssertionError, match="forbidden"):
             getattr(conn, method)("1")
+
+    @pytest.mark.parametrize(
+        ("flags", "date_time"),
+        [
+            (None, None),
+            ("(\\Seen)", None),
+            ("(\\Draft)", None),
+            ("(\\Draft \\Seen \\Flagged)", None),
+            ("(\\Seen \\Draft)", None),
+            ("(\\Draft \\Seen)", '"12-Oct-2026 12:00:00 +0000"'),
+        ],
+    )
+    def test_append_only_saves_a_draft(self, conn, server, flags, date_time):
+        with pytest.raises(AssertionError, match="forbidden"):
+            conn.append('"Drafts"', flags, date_time, b"Subject: x\r\n\r\nx\r\n")
+        assert not server.folders["Drafts"].messages
+
+    def test_append_draft(self, conn, server):
+        typ, _ = conn.append('"Drafts"', "(\\Draft \\Seen)", None, b"Subject: x\n\nx\n")
+        assert typ == "OK"
+        [msg] = server.folders["Drafts"].messages.values()
+        assert msg.flags == {"\\Draft", "\\Seen"}
+        assert msg.raw == b"Subject: x\r\n\r\nx\r\n"
+        assert conn.response("APPENDUID") == ("APPENDUID", [f"1 {msg.uid}".encode()])
+
+    def test_append_switches_and_missing_folder(self, conn, server):
+        assert conn.append('"Nope"', "(\\Draft \\Seen)", None, b"x")[0] == "NO"
+        server.fail_append = True
+        assert conn.append('"Drafts"', "(\\Draft \\Seen)", None, b"x")[0] == "NO"
+        assert not server.folders["Drafts"].messages
+        server.fail_append, server.appenduid = False, "omit"
+        assert conn.append('"Drafts"', "(\\Draft \\Seen)", None, b"x")[0] == "OK"
+        assert conn.response("APPENDUID") == ("APPENDUID", [None])
+        assert len(server.folders["Drafts"].messages) == 1
 
     @pytest.mark.parametrize(
         "args",
@@ -278,6 +312,100 @@ class TestGuardedMove:
         with pytest.raises(ToolInputError, match="protected"):
             writer.guarded_move(MailId("INBOX", 1, uid), refuse)
         assert sequence(server) == ["LOGOUT"]
+
+
+DRAFT = b"Subject: Lunch\r\nTo: bob@example.com\r\n\r\nNoon?\r\n"
+
+
+class TestAppendDraft:
+    def test_exact_command_sequence(self, server, writer):
+        server.commands.clear()
+        saved = writer.append_draft(DRAFT)
+        opened = {"CAPABILITY", "LOGIN", "ENABLE"}
+        assert [c[0] for c in server.commands if c[0] not in opened] == ["LIST", "APPEND", "LOGOUT"]
+        assert ("APPEND", '"Drafts"', "(\\Draft \\Seen)") in server.commands
+        [msg] = server.folders["Drafts"].messages.values()
+        assert msg.flags == {"\\Draft", "\\Seen"}
+        assert msg.raw == DRAFT
+        assert saved.folder == "Drafts"
+        assert saved.new_id == MailId("Drafts", 1, msg.uid)
+
+    def test_other_mail_is_untouched(self, server, writer):
+        deliver(server, "INBOX")
+        before = server.all_flags()
+        writer.append_draft(DRAFT)
+        after = server.all_flags()
+        assert {k: v for k, v in after.items() if k[0] != "Drafts"} == before
+
+    def test_drafts_found_while_hidden_from_the_read_scope(self, server, h, writer):
+        assert not h.account.mail.folders.allows("Drafts")  # hidden by default
+        assert writer.append_draft(DRAFT).new_id is not None
+
+    def test_saved_without_appenduid(self, server, writer):
+        server.appenduid = "omit"
+        saved = writer.append_draft(DRAFT)
+        assert saved.new_id is None and saved.folder == "Drafts"
+        assert len(server.folders["Drafts"].messages) == 1  # saved once, never retried
+
+    @pytest.mark.parametrize("code", [b"1 2:3", b"1 2,3", b"x 2", b"1"])
+    def test_appenduid_must_name_one_uid(self, server, writer, monkeypatch, code):
+        real = FakeConn.append
+
+        def append(conn, *args):
+            out = real(conn, *args)
+            conn._responses["APPENDUID"] = [code]
+            return out
+
+        monkeypatch.setattr(FakeConn, "append", append)
+        assert writer.append_draft(DRAFT).new_id is None
+        assert len(server.folders["Drafts"].messages) == 1
+
+    def test_without_uidplus_nothing_is_sent(self, tmp_path):
+        server = FakeServer(capabilities=("IMAP4REV1", "IDLE", "CONDSTORE", "ENABLE"))
+        server.folder("Drafts")
+        h = Harness(server, make_config(tmp_path).account("alice"), tmp_path)
+        server.commands.clear()
+        with pytest.raises(WriteFailed, match="no UIDPLUS.*nothing was saved"):
+            MailWriter(h.pool).append_draft(DRAFT)
+        assert sequence(server) == ["LOGOUT"]  # not even LIST
+        assert not any(c[0] == "LIST" for c in server.commands)
+        assert not server.folders["Drafts"].messages
+
+    def test_missing_drafts_refused_before_append(self, server, writer):
+        del server.folders["Drafts"]
+        server.commands.clear()
+        with pytest.raises(ToolInputError, match="^Drafts folder not found; nothing was saved$"):
+            writer.append_draft(DRAFT)
+        assert "APPEND" not in [c[0] for c in server.commands]
+
+    def test_drafts_found_by_name_only(self, server, writer):
+        # A folder marked \Drafts but named otherwise is never used (iCloud has no attribute).
+        del server.folders["Drafts"]
+        server.folder("Entwürfe").special_use = "\\Drafts"
+        with pytest.raises(ToolInputError, match="Drafts folder not found"):
+            writer.append_draft(DRAFT)
+        assert not server.folders["Entwürfe"].messages
+
+    def test_failed_append_saves_nothing(self, server, writer):
+        server.fail_append = True
+        with pytest.raises(WriteFailed, match="^saving the draft failed; nothing was saved$"):
+            writer.append_draft(DRAFT)
+        assert not server.folders["Drafts"].messages
+
+    def test_connection_lost_during_append(self, server, writer, monkeypatch):
+        def drop(conn, *args):
+            raise imaplib.IMAP4.abort("socket error: EOF")
+
+        monkeypatch.setattr(FakeConn, "append", drop)
+        with pytest.raises(WriteFailed, match="may or may not have been saved"):
+            writer.append_draft(DRAFT)
+
+    def test_write_connection_never_returns_to_the_read_pool(self, server, h, writer):
+        h.service.folders()
+        before = server.connections
+        writer.append_draft(DRAFT)
+        assert server.connections == before + 1
+        assert h.pool._free.qsize() == 1
 
 
 class TestFolderResolution:

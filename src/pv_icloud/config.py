@@ -30,9 +30,12 @@ SPECIAL_FOLDERS = {"junk": "Junk", "deleted_messages": "Deleted Messages", "draf
 
 # Mail writes (docs/adr/0004-opt-in-mail-write.md): off unless this variable is `enabled`.
 MAIL_WRITE_ENV = "PV_ICLOUD_MAIL_WRITE"
-MAIL_WRITE_ACTIONS = ("move", "archive", "delete")
+MAIL_WRITE_ACTIONS = ("move", "archive", "delete", "draft")
 MAX_WRITES_PER_HOUR = 30
-_MAIL_WRITE_KEYS = ("protected_folders", "archive_folder")
+_MAIL_WRITE_KEYS = ("protected_folders", "archive_folder", "send_from")
+# One bare address, local@domain: no display name, spaces, commas or angle brackets, and a
+# domain with a dot.
+BARE_ADDRESS_RE = re.compile(r"^[^@\s,;<>()\"]+@[^@\s,;<>()\".]+(\.[^@\s,;<>()\".]+)+$")
 
 
 class ConfigError(Exception):
@@ -64,6 +67,7 @@ class MailWriteConfig:
     # Defaults and account lists together: an account adds to the defaults, never replaces.
     protected_folders: tuple[str, ...] = ()
     archive_folder: str = "Archive"
+    send_from: str | None = None  # From of drafts; unset: no From (Mail fills it in)
 
 
 @dataclass(frozen=True)
@@ -242,7 +246,12 @@ def _mail_write(defaults: Any, account: Any, where: str) -> MailWriteConfig:
     archive = own.get("archive_folder", base.get("archive_folder", "Archive"))
     if not isinstance(archive, str) or not archive:
         raise ConfigError(f"{where}.mail.write.archive_folder must be a folder name")
-    return MailWriteConfig(tuple(dict.fromkeys(protected)), archive)
+    send_from = own.get("send_from", base.get("send_from"))
+    if send_from is not None and (
+        not isinstance(send_from, str) or not BARE_ADDRESS_RE.match(send_from)
+    ):
+        raise ConfigError(f"{where}.mail.write.send_from must be one bare address (local@domain)")
+    return MailWriteConfig(tuple(dict.fromkeys(protected)), archive, send_from)
 
 
 def parse_config(raw: Mapping[str, Any], env: Mapping[str, str], data_dir: Path) -> Config:

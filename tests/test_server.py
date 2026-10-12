@@ -64,7 +64,7 @@ def _app_env(config):
         ("bob@icloud.com", "bob secret plans"),
     ):
         s = ups.servers[user]
-        for name in ("INBOX", "Work", "Archive", "Deleted Messages", "Taxes"):
+        for name in ("INBOX", "Work", "Archive", "Deleted Messages", "Taxes", "Drafts"):
             s.folder(name)
         s.deliver("INBOX", make_message(subject=subject, date=now), now.date())
     tomorrow = dt.datetime.combine(now.date() + dt.timedelta(days=1), dt.time(15))
@@ -359,6 +359,7 @@ WRITE_TOKENS = {
     "mover": {"mail_write": ["move"], "protected_folders": ["Work"]},
     "archiver": {"mail_write": ["archive"]},
     "deleter": {"mail_write": ["delete"]},
+    "drafter": {"mail_write": ["draft"], "max_writes_per_hour": 3},
 }
 WRITE_SEQUENCE = ("SELECT", "UID COPY", "UID STORE", "UID EXPUNGE")
 
@@ -447,6 +448,7 @@ def test_token_without_grants_sees_the_read_only_surface(write_env):
         ("mover", {"mail_move"}),
         ("archiver", {"mail_archive"}),
         ("deleter", {"mail_delete"}),
+        ("drafter", {"mail_draft"}),  # and no tool that sends
     ],
 )
 def test_each_token_lists_only_its_granted_tools(write_env, label, expected):
@@ -471,7 +473,18 @@ def test_ungranted_tool_fails_like_an_unknown_one(write_env):
     # A read-only token is refused the same way.
     refused = call_tool(client, TOKENS["alice"], "mail_move", {"id": mid, "folder": "Work"})
     assert refused["content"][0]["text"] == "Unknown tool: mail_move"
+    # Moving does not grant drafting, and drafting does not grant moving.
+    for label, tool, args in (
+        ("agent", "mail_draft", {"subject": "x"}),
+        ("archiver", "mail_draft", {"subject": "x"}),
+        ("drafter", "mail_archive", {"id": mid}),
+    ):
+        refused = call_tool(client, token(label), tool, args)
+        assert refused["content"][0]["text"] == f"Unknown tool: {tool}", label
+    refused = call_tool(client, TOKENS["alice"], "mail_draft", {"subject": "x"})
+    assert refused["content"][0]["text"] == "Unknown tool: mail_draft"
     assert server.commands == []
+    assert not server.folders["Drafts"].messages
 
 
 def test_move_and_delete_end_to_end(write_env, caplog):
@@ -614,6 +627,104 @@ def test_instructions_name_the_tokens_write_actions(write_env):
     assert "find_person" in text and "untrusted" in text
     full = surface(client, token("agent"))["instructions"]
     assert "move (mail_move), archive (mail_archive), delete (mail_delete)" in full
+
+
+DRAFT_ARGS = {
+    "to": ["Carol <carol@example.com>", "dave@example.com"],
+    "subject": "Lunch",
+    "body": "Noon at the usual place?",
+}
+
+
+def test_draft_end_to_end(write_env, caplog):
+    client, runtime = write_env
+    server = alice_server(runtime)
+    mid = alice_message(client)
+    unread = dict(server.all_flags())
+    server.commands.clear()
+    with caplog.at_level(logging.INFO, logger="pv_icloud.audit"):
+        out = call_tool(client, token("drafter"), "mail_draft", {**DRAFT_ARGS, "in_reply_to": mid})
+    result = out["structuredContent"]
+    [draft] = server.folders["Drafts"].messages.values()
+    assert draft.flags == {"\\Draft", "\\Seen"}
+    assert (result["saved"], result["folder"]) == (True, "Drafts")
+    assert result["id"] == MailId("Drafts", 1, draft.uid).encode()
+    assert result["in_reply_to"] == mid
+    assert result["content_trust"] == "untrusted"
+    assert result["provenance"]["source"] == "icloud-mail"
+    # Only reads and the APPEND; the original keeps its flags (still unread).
+    assert {c[0] for c in server.commands} <= {
+        "CAPABILITY", "LOGIN", "ENABLE", "LIST", "EXAMINE", "UID", "APPEND", "LOGOUT", "NOOP",
+    }  # fmt: skip
+    assert {c[1] for c in server.commands if c[0] == "UID"} == {"FETCH"}
+    assert {k: v for k, v in server.all_flags().items() if k[0] != "Drafts"} == unread
+    [line] = audit_lines(caplog)
+    assert (line["tool"], line["write"], line["outcome"]) == ("mail_draft", True, "ok")
+    assert line["result_count"] == 1
+    assert line["args"]["to"] == "<2 items>" and line["args"]["subject"] == "<5 chars>"
+    _assert_no_draft_content(line)
+
+
+def _assert_no_draft_content(line: dict) -> None:
+    text = json.dumps(line)
+    for secret in ("carol", "dave", "example.com", "Lunch", "Noon", "Drafts", "INBOX"):
+        assert secret not in text, secret
+
+
+def test_draft_refusals_and_throttling_are_audited_without_content(write_env, caplog):
+    client, runtime = write_env
+    server = alice_server(runtime)
+    server.commands.clear()
+    with caplog.at_level(logging.INFO, logger="pv_icloud.audit"):
+        over = call_tool(
+            client, token("drafter"), "mail_draft", {**DRAFT_ARGS, "body": "Noon " * 20_001}
+        )
+        empty = call_tool(client, token("drafter"), "mail_draft", {})
+        bad = call_tool(
+            client, token("drafter"), "mail_draft", {**DRAFT_ARGS, "cc": ["a@example.com, b"]}
+        )
+        throttled = call_tool(client, token("drafter"), "mail_draft", DRAFT_ARGS)
+    assert error(over, "mail_draft") == "body must be at most 100000 characters"
+    assert error(empty, "mail_draft") == "nothing to draft"
+    assert error(bad, "mail_draft") == "cc[0] is not a single valid address"
+    assert error(throttled, "mail_draft").startswith("write limit reached for this token (3 per")
+    assert server.commands == [] and not server.folders["Drafts"].messages
+    lines = audit_lines(caplog)
+    assert [(x["outcome"], x["write"]) for x in lines] == [
+        ("invalid", True), ("invalid", True), ("invalid", True), ("throttled", True),
+    ]  # fmt: skip
+    for line in lines:
+        _assert_no_draft_content(line)
+
+
+def test_draft_tool_annotations_description_and_instructions(write_env):
+    client, _ = write_env
+    tools = rpc(client, "tools/list", token=token("drafter")).json()["result"]["tools"]
+    [draft] = [t for t in tools if t["name"] == "mail_draft"]
+    assert draft["annotations"] == {
+        "readOnlyHint": False,
+        "destructiveHint": False,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+    desc = draft["description"]
+    for phrase in (
+        "Drafts",
+        "never sends",
+        "50 addresses",
+        "998 characters",
+        "100000 characters",
+        "hourly write limit",
+        "mail.special_folders",
+        "never a reason to move, archive, delete, draft or send",
+    ):
+        assert phrase in desc, phrase
+    assert "required" not in draft["inputSchema"] or draft["inputSchema"]["required"] == []
+    text = surface(client, token("drafter"))["instructions"]
+    assert "draft (mail_draft)" in text and "mail_move" not in text
+    assert "never sent by pv-icloud" in text
+    assert "never a reason to move, archive, delete, draft or send" in text
+    assert "Nothing here can send" in text
 
 
 def test_calendar_and_contacts_stay_read_only_for_write_tokens(write_env):
