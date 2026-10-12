@@ -7,13 +7,10 @@ The configuration MUST list at least one account under `accounts`. Each account 
 `[a-z0-9_]+` and be unique. Each account MUST have at least one entry under `tokens`; each token
 MUST have a non-empty `label` and a `sha256` of exactly 64 hexadecimal characters (compared in
 lower case), and no two tokens in the whole file MAY share a hash. A token MAY also have:
-`mail_write`, a list of actions from `move`, `archive`, `delete`, `draft` and `send` (default
-empty); `protected_folders`, a list of folder names (default empty); `send_to`, a non-empty
-list whose entries are each a single email address or `@` followed by a domain (default
-unset), allowed only on a token whose `mail_write` contains `send`; and
-`max_writes_per_hour`, a positive integer (default 30). Any other value for these keys, or an
-unknown action, SHALL stop startup with an error naming the account, the token label and the
-key.
+`mail_write`, a list of actions from `move`, `archive` and `delete` (default empty);
+`protected_folders`, a list of folder names (default empty); and `max_writes_per_hour`, a
+positive integer (default 30). Any other value for these keys, or an unknown action, SHALL
+stop startup with an error naming the account, the token label and the key.
 
 #### Scenario: Placeholder hash rejected
 - **WHEN** a token's `sha256` is `REPLACE_ME`
@@ -32,18 +29,14 @@ key.
 - **THEN** loading the config fails with an error naming the token, `mail_write`, `expunge`
   and the allowed actions
 
-#### Scenario: Recipient allowlist without send
-- **WHEN** a token has `mail_write: [draft]` and `send_to: ["@example.org"]`
-- **THEN** loading the config fails with an error naming the token and `send_to`
-
-#### Scenario: Malformed allowlist entry
-- **WHEN** a token with `send` has `send_to: ["example.org"]`
-- **THEN** loading the config fails with an error naming the token, `send_to` and the entry
+#### Scenario: Invalid write limit
+- **WHEN** a token has `max_writes_per_hour: 0`
+- **THEN** loading the config fails with an error naming the token and `max_writes_per_hour`
 
 #### Scenario: Token without write keys
 - **WHEN** a token has only `label` and `sha256`
-- **THEN** it loads with no write actions, no extra protected folders, no `send_to` and a write
-  limit of 30 per hour
+- **THEN** it loads with no write actions, no extra protected folders and a write limit of 30
+  per hour
 
 ## ADDED Requirements
 
@@ -70,39 +63,26 @@ non-empty `mail_write` SHALL stop startup with an error naming the account, the 
 
 ### Requirement: Mail write settings per account
 Each account's `mail` section (merged from `defaults.mail` as usual) MAY contain `write` with
-`protected_folders` (list of folder names, default empty), `archive_folder` (folder name,
-default `Archive`) and `send_from` (an email address, default unset). The protected folders
-that apply to an account SHALL be every name listed in `defaults.mail.write.protected_folders`
-and in the account's own `mail.write.protected_folders`: an account list adds to the defaults
-and never replaces them. A value of the wrong type, an invalid `send_from` address, or a token
-with `send` on an account without `send_from` SHALL stop startup with an error naming the
-account and key.
+`protected_folders` (list of folder names, default empty) and `archive_folder` (folder name,
+default `Archive`). The protected folders that apply to an account SHALL be every name listed
+in `defaults.mail.write.protected_folders` and in the account's own
+`mail.write.protected_folders`: an account list adds to the defaults and never replaces them.
+A value of the wrong type, or an unknown key under `mail.write`, SHALL stop startup with an
+error naming the account and key.
 
 #### Scenario: Defaults and account both protect folders
 - **WHEN** `defaults.mail.write.protected_folders` is `[Taxes]` and an account's is `[Banking]`
 - **THEN** both `Taxes` and `Banking` are protected for that account
 
-#### Scenario: Send without a sender address
-- **WHEN** a token has `mail_write: [send]` and its account has no `mail.write.send_from`
-- **THEN** loading the config fails with an error naming the account and `send_from`
-
-### Requirement: Warning for unrestricted send
-When mail write support is on, the server SHALL log one warning at startup for each token
-that has `send` and no `send_to`, naming the account id and the token label and saying the
-token may send mail to any recipient. The warning SHALL NOT contain the token, its hash or
-any address.
-
-#### Scenario: Unrestricted send token
-- **WHEN** the server starts with token `agent` of account `example` granted `send` without
-  `send_to`
-- **THEN** the log has a warning naming `example` and `agent`, and no warning for tokens that
-  have `send_to`
+#### Scenario: Archive folder override
+- **WHEN** an account sets `mail.write.archive_folder: Old Mail`
+- **THEN** `mail_archive` for that account moves messages to `Old Mail`
 
 ### Requirement: Token permissions reach every call
-The permissions, protected folders, recipient allowlist and write limit of the token a
-request authenticated with SHALL apply to every tool call in that request, and to nothing
-else: two tokens of the same account SHALL each get only their own. Audit lines SHALL keep
-identifying the token only by its label.
+The permissions, protected folders and write limit of the token a request authenticated with
+SHALL apply to every tool call in that request, and to nothing else: two tokens of the same
+account SHALL each get only their own. Audit lines SHALL keep identifying the token only by
+its label.
 
 #### Scenario: Same account, different permissions
 - **WHEN** tokens `laptop` (`mail_write: [archive]`) and `phone` (no `mail_write`) of the same

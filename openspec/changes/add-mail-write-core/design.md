@@ -14,9 +14,21 @@ token's account and label but nothing else about the token.
 The maintainer checked a live iCloud account: it advertises `UIDPLUS` and `UNSELECT`, not
 `MOVE`; Drafts and Archive have no special-use attribute but exist under those names.
 
-Modules touched: `config`, `auth`, `server`, `mail/service`, `mail/sync`, new
-`mail/imap_write`, new `mail/smtp`, new `ratelimit`. `mail/imap`, `dav`, `cal/`, `contacts/`
-and `people` are not touched.
+This design covers all of #14, which is delivered as three OpenSpec changes:
+
+| Change | Scope | Decisions used |
+| --- | --- | --- |
+| `add-mail-write-core` (this one) | switch, config/auth, per-token tools and instructions, protected folders, rate limit, `mail_move`, `mail_archive`, `mail_delete` | 1–6, 8–10 |
+| `add-mail-draft` | `mail_draft`, `APPEND` into Drafts | 4 (`APPEND`), 5, 8, 9, 10 |
+| `add-mail-send` | `mail_send`, `send_to`, SMTP egress, sent copy | 2 (`send_to`, `send_from`), 4 (`APPEND`), 5, 7, 8, 9, 10 |
+
+The later changes are kept here so the three fit together; only this change's part is in its
+spec deltas and tasks. Each later change will copy what it needs into its own proposal and
+may revise it.
+
+Modules touched by this change: `config`, `auth`, `server`, `mail/service`, `mail/sync`, new
+`mail/imap_write`, new `ratelimit`. `add-mail-send` adds `mail/smtp`. `mail/imap`, `dav`,
+`cal/`, `contacts/` and `people` are not touched by any of the three.
 
 Prerequisite, outside this change: the maintainer's own pull request updates CLAUDE.md's
 read-only hard rule, `.github/CODEOWNERS` (adding `mail/imap_write.py` and `mail/smtp.py`),
@@ -49,11 +61,11 @@ read-only hard rule, `.github/CODEOWNERS` (adding `mail/imap_write.py` and `mail
 
 `PV_ICLOUD_MAIL_WRITE` is read at startup. `enabled` turns write support on; unset, empty or
 `disabled` leave it off; any other value is a config error (so a typo such as `true` is not
-silently ignored). When off, `server.py` never imports `mail/imap_write.py`, `mail/smtp.py`
-or registers a write tool, and a token with a non-empty `mail_write` is a config error naming
-the account, the token label, `mail_write` and `PV_ICLOUD_MAIL_WRITE`. The other write keys
-(`protected_folders`, `send_to`, `max_writes_per_hour`, `mail.write`) are still validated but
-have no effect. *Why:* an operator who copies a config with grants onto a host where writes
+silently ignored). When off, `server.py` never imports `mail/imap_write.py` (nor, once
+`add-mail-send` lands, `mail/smtp.py`) or registers a write tool, and a token with a
+non-empty `mail_write` is a config error naming the account, the token label, `mail_write`
+and `PV_ICLOUD_MAIL_WRITE`. The other write keys (`protected_folders`, `max_writes_per_hour`,
+`mail.write`, and later `send_to`) are still validated but have no effect. *Why:* an operator who copies a config with grants onto a host where writes
 should be off gets a loud failure, not silent write access.
 
 ### 2. Permissions live on the token
@@ -77,20 +89,27 @@ accounts:
         send_from: someone@example.com # required only if some token has `send`
 ```
 
-`TokenEntry` gains `mail_write: frozenset[str]`, `protected_folders: tuple[str, ...]`,
-`send_to: tuple[str, ...] | None` and `max_writes_per_hour: int`; `AccountContext` carries
-them into each request. Validation errors name the account, token label and key:
+The example shows the end state after all three changes. In `add-mail-write-core` the known
+actions are `move`, `archive` and `delete`, and the keys are `mail_write`,
+`protected_folders`, `max_writes_per_hour` and `mail.write.protected_folders` /
+`archive_folder`. `draft` is added by `add-mail-draft`; `send`, `send_to` and
+`mail.write.send_from` by `add-mail-send`. Until then those are rejected like any unknown
+action or key would be.
+
+`TokenEntry` gains `mail_write: frozenset[str]`, `protected_folders: tuple[str, ...]` and
+`max_writes_per_hour: int` (and later `send_to: tuple[str, ...] | None`); `AccountContext`
+carries them into each request. Validation errors name the account, token label and key:
 
 - `mail_write` not a list, or an unknown action;
 - `protected_folders` not a list of strings;
-- `send_to` present on a token without `send`, empty, or with an entry that is neither a
-  single bare address nor `@` followed by a domain;
 - `max_writes_per_hour` not a positive integer;
-- `send` on an account without `mail.write.send_from`.
+- (`add-mail-send`) `send_to` present on a token without `send`, empty, or with an entry that
+  is neither a single bare address nor `@` followed by a domain;
+- (`add-mail-send`) `send` on an account without `mail.write.send_from`.
 
-At startup, each token with `send` and no `send_to` gets a warning: `token <label> of account
-<id> may send mail to any recipient (no send_to)`. Labels and account ids are already logged
-in audit lines, so this logs nothing new.
+(`add-mail-send`) At startup, each token with `send` and no `send_to` gets a warning: `token
+<label> of account <id> may send mail to any recipient (no send_to)`. Labels and account ids
+are already logged in audit lines, so this logs nothing new.
 
 *Alternative considered:* per-account switches. Rejected by the issue: two tokens on the same
 Apple ID must be able to differ.
@@ -136,13 +155,14 @@ account's pool:
 The copy keeps the message's flags (`\Seen` included) because `UID COPY` runs before
 `\Deleted` is set. The result's `new_id` comes from `COPYUID`, so it is always known.
 
-Draft and send use `APPEND <folder> (<flags>) <message>`: `(\Draft \Seen)` into Drafts and
-`(\Seen)` into Sent Messages, with the new id from `APPENDUID`. Setting flags on a message
-being created is not `STORE`.
+(`add-mail-draft`, `add-mail-send`) Draft and send use `APPEND <folder> (<flags>)
+<message>`: `(\Draft \Seen)` into Drafts and `(\Seen)` into Sent Messages, with the new id
+from `APPENDUID`. Setting flags on a message being created is not `STORE`. `APPEND` is added
+to the allowed list by those changes, not by this one.
 
 **Allowed write forms, exactly.** `SELECT`; `UID COPY` with one UID; `UID STORE` with one UID
-and exactly `+FLAGS.SILENT (\Deleted)`; `UID EXPUNGE` with one UID; `APPEND`. All only in
-`mail/imap_write.py`. **Forbidden everywhere:** `STORE`, `COPY`, `EXPUNGE` (non-UID),
+and exactly `+FLAGS.SILENT (\Deleted)`; `UID EXPUNGE` with one UID; later `APPEND`. All only
+in `mail/imap_write.py`. **Forbidden everywhere:** `STORE`, `COPY`, `EXPUNGE` (non-UID),
 `CLOSE`, `MOVE`/`UID MOVE`, any UID set or range, any other flag or `-FLAGS`/`FLAGS`,
 `CREATE`, `DELETE`, `RENAME`, `SUBSCRIBE`, `UNSUBSCRIBE`. A static test in
 `tests/test_repo_policy.py` inspects IMAP call sites (`imaplib` method calls and the command
@@ -158,9 +178,10 @@ boundary that CODEOWNERS and static tests can see).
 ### 5. Finding Archive, Deleted Messages, Drafts and Sent
 
 - Archive: `mail.write.archive_folder`, default `Archive`, by name.
-- Drafts: `Drafts`, by name.
 - Deleted Messages: the folder `LIST` marks `\Trash`, otherwise `Deleted Messages`.
-- Sent Messages: the folder `LIST` marks `\Sent`, otherwise `Sent Messages`.
+- (`add-mail-draft`) Drafts: `Drafts`, by name.
+- (`add-mail-send`) Sent Messages: the folder `LIST` marks `\Sent`, otherwise
+  `Sent Messages`.
 
 iCloud gives Drafts and Archive no special-use attribute, so they are found by name only;
 the fake mirrors this. If a folder is missing, the tool fails and changes nothing. These
@@ -180,11 +201,12 @@ write calls in the last hour (sliding window). Every call to a granted write too
 whatever its outcome, and the check runs first, before argument validation and before any
 IMAP or SMTP traffic. Over the limit, the call fails with `write limit reached for this
 token (N per hour); try again in about M minutes`, and the audit outcome is `throttled`. The
-limit is per token, so two tokens of one account have separate budgets. It resets on
-restart; that is acceptable because it guards against a runaway or prompt-injected client,
-not against the operator.
+limit is per token, so two tokens of one account have separate budgets. The counts are held
+only in memory and reset when the server restarts; nothing is written to disk. That is
+acceptable because the limit guards against a runaway or prompt-injected client, not against
+the operator, who can restart the server anyway.
 
-### 7. Sending through iCloud SMTP, with `send_to`
+### 7. Sending through iCloud SMTP, with `send_to` (`add-mail-send`)
 
 `mail/smtp.py` uses the standard library's `smtplib.SMTP` to `smtp.mail.me.com:587`, requires
 STARTTLS with certificate verification before `AUTH`, logs in with the account's Apple ID
@@ -203,13 +225,22 @@ original sender of a message being replied to gets no exception.
 
 With `in_reply_to` (a mail id) the original is read on the existing read path (`EXAMINE` and
 `BODY.PEEK[]`, as `mail_get` does) to set `In-Reply-To`, `References` and a `Re:` subject
-when none is given. After the server accepts the message, a copy is appended to Sent
-Messages; if that append fails the tool still reports success with `sent_copy_saved: false`,
-since the mail has gone. `Bcc` addresses go into the SMTP envelope but never into the headers
-sent over SMTP; the copy in Sent Messages keeps the `Bcc` header, as Apple Mail does.
+when none is given.
+
+**Sent copy, without duplicates.** Whether iCloud's SMTP server files its own copy in Sent
+Messages has not been checked, so the code does not assume either way. After SMTP accepts
+the message, `mail_send` looks for it in Sent Messages on the read path: `EXAMINE` the Sent
+folder and `UID SEARCH HEADER Message-ID <generated id>` (a read command already allowed).
+If the message is found, nothing is appended and `sent_copy_saved` is `true`. Only if it is
+not found is a copy appended with `APPEND` and `(\Seen)`. If the check itself fails, the
+tool appends anyway (a possible duplicate is better than a missing copy). If the append
+fails, the tool still reports success with `sent_copy_saved: false`, since the mail has gone.
+The fake SMTP server gets a switch to file its own copy, so both paths are tested. `Bcc`
+addresses go into the SMTP envelope but never into the headers sent over SMTP; a copy
+appended by pv-icloud keeps the `Bcc` header, as Apple Mail does.
 
 `send_to` does not apply to `mail_draft`: a draft sends nothing, and only a person in a mail
-client can send it.
+client can send it. (Proposed; `add-mail-draft` and `add-mail-send` confirm or change it.)
 
 ### 8. Per-token tool list and instructions
 
@@ -224,16 +255,17 @@ never be the reason to move, archive, delete, draft or send.
 
 Annotations: `mail_move` and `mail_archive` `readOnlyHint: false, destructiveHint: false,
 idempotentHint: false`; `mail_delete` `destructiveHint: true, idempotentHint: false`;
-`mail_draft` `destructiveHint: false, idempotentHint: false`; `mail_send`
+later `mail_draft` `destructiveHint: false, idempotentHint: false` and `mail_send`
 `destructiveHint: true, idempotentHint: false`. All `openWorldHint: true`. (A second move of
 the same id fails as not found, so none of them is idempotent.)
 
 ### 9. Limits
 
-`to`, `cc` and `bcc` together at most 50 addresses, each a single valid address; `subject` at
-most 998 characters with no line breaks; `body` at most 100,000 characters; the per-token
-hourly write limit (default 30). These are written into the tool descriptions. No new paging:
-every write tool returns a single result.
+This change: one message per call and the per-token hourly write limit (default 30).
+(`add-mail-draft`, `add-mail-send`) `to`, `cc` and `bcc` together at most 50 addresses, each
+a single valid address; `subject` at most 998 characters with no line breaks; `body` at most
+100,000 characters. These are written into the tool descriptions. No new paging: every write
+tool returns a single result.
 
 ### 10. Audit and index
 
@@ -260,24 +292,22 @@ pass.
   the fake reject every other form; plain `EXPUNGE` and `CLOSE` stay forbidden.
 - [`SELECT` clears `\Recent` in the source folder] → Accepted: `\Recent` is session state
   that iCloud clients do not show; `\Seen` and other flags are untouched.
-- [iCloud might save its own copy of SMTP-sent mail, leaving two in Sent Messages] → Open
-  question below; the fake and the code follow whichever is true.
-- [The rate limit resets on restart] → Accepted; see decision 6.
+- [iCloud might save its own copy of SMTP-sent mail, leaving two in Sent Messages]
+  (`add-mail-send`) → After sending, look for the Message-ID in Sent Messages on the read
+  path and append only if it is missing; see decision 7.
+- [The rate limit is in memory and resets on restart] → Accepted; see decision 6.
 - [The capability name `read-only-and-egress` no longer describes Mail] → Kept to avoid a
   spec rename in the same change; its Purpose text is updated at archive time.
 
 ## Migration Plan
 
 No migration: new keys default to off, so existing configs behave exactly as before.
-Operators opt in by setting `PV_ICLOUD_MAIL_WRITE=enabled`, adding `mail_write` to a token
-and, for `send`, `mail.write.send_from`, ideally `send_to`, and an egress rule for
-`smtp.mail.me.com:587`. Rollback is unsetting the switch, removing `mail_write` and
-restarting.
+Operators opt in by setting `PV_ICLOUD_MAIL_WRITE=enabled` and adding `mail_write` to a
+token. Once `add-mail-send` lands, `send` also needs `mail.write.send_from`, ideally
+`send_to`, and an egress rule for `smtp.mail.me.com:587`. Rollback is unsetting the switch,
+removing `mail_write` and restarting.
 
 ## Open Questions
 
-- Does iCloud's SMTP server save a copy of sent mail in Sent Messages by itself? If it does,
-  the explicit `APPEND` is skipped. This needs checking against a real account; it changes
-  one step, not the specs.
 - Does iCloud's `\Trash` and `\Sent` marking match what the fake will record? The name
   fallbacks cover it either way.
