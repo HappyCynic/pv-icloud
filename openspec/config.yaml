@@ -10,10 +10,13 @@ schema: spec-driven
 context: |
   Project: Private iCloud MCP (`pv-icloud`), a public, Apache-2.0 repository.
 
-  Purpose: a read-only Model Context Protocol server that lets MCP clients search and read
-  iCloud Mail, Calendar and Contacts. One server serves several iCloud accounts; each bearer
-  token maps to exactly one account, and accounts are strictly isolated. Overview and tool
-  list: README.md. Out of scope: Reminders, Notes and any write action (docs/design.md, Goals).
+  Purpose: a Model Context Protocol server that lets MCP clients search and read iCloud Mail,
+  Calendar and Contacts. It is read-only by default; mail writes (move, archive, delete,
+  draft, send) are opt-in per deployment and per token (docs/adr/0004-opt-in-mail-write.md).
+  One server serves several iCloud accounts; each bearer token maps to exactly one account,
+  and accounts are strictly isolated. Overview and tool list: README.md. Out of scope:
+  Reminders, Notes, Calendar and Contacts writes, and permanent mail deletion
+  (docs/design.md, Goals).
 
   Tech stack: Python 3.14, managed with uv (uv.lock is committed). Official MCP Python SDK
   serving stateless Streamable HTTP at /mcp (Starlette + uvicorn); httpx for CalDAV, CardDAV
@@ -25,11 +28,13 @@ context: |
   - One process: MCP server plus, per account, a mail sync thread, an IMAP connection pool,
     a CalDAV client and a CardDAV client with an in-memory contacts cache.
   - Modules under src/pv_icloud/: config, auth (token -> account), server (tools, audit
-    log, /healthz), mail/ (IMAP, parsing, FTS5 index, sync), dav (read-only WebDAV base),
+    log, /healthz), mail/ (IMAP read path, the opt-in write path in mail/imap_write.py,
+    parsing, FTS5 index, sync), ratelimit (per-token write limit), dav (read-only WebDAV base),
     cal/ (CalDAV, subscribed feeds, recurrence expansion), contacts/ (CardDAV, vCard),
     people (find_person).
-  - Mail search runs on a local per-account FTS5 index kept current with CONDSTORE/QRESYNC
-    and IDLE; single messages and threads are read live from iCloud.
+  - Mail search runs on a local per-account FTS5 index kept current with CONDSTORE (unchanged
+    folders skipped, removals found by a UID SEARCH diff) and IDLE; single messages and
+    threads are read live from iCloud.
 
   Constraints. These are the hard rules in CLAUDE.md, which is authoritative; reasons are in
   CONTRIBUTING.md, SECURITY.md and docs/design.md:
