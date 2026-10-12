@@ -5,8 +5,9 @@
 *                         @mwklein
 
 # Listed explicitly so these stay owned even if the default above changes: CI and repository
-# settings, the container build, dependencies, the security policy, and the two modules that
-# keep the server read-only (DAV methods and IMAP commands).
+# settings, the container build, dependencies, the security policy, the modules that keep the
+# read path read-only (DAV methods and IMAP read commands), and the only modules allowed to
+# change mail (ADR-0004; created by the add-mail-write-core change).
 /.github/                 @mwklein
 /Dockerfile               @mwklein
 /pyproject.toml           @mwklein
@@ -14,6 +15,8 @@
 /SECURITY.md              @mwklein
 /src/pv_icloud/dav.py     @mwklein
 /src/pv_icloud/mail/imap.py @mwklein
+/src/pv_icloud/mail/imap_write.py @mwklein
+/src/pv_icloud/mail/smtp.py @mwklein
 
 # Agent instructions and configuration: what the agent reads before it acts.
 /CLAUDE.md                @mwklein
