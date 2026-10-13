@@ -14,5 +14,6 @@ body:
     attributes:
       label: Suggested change
       description: |
-        Optional. Note that the server is read-only by design: changes that send, move,
-        delete or edit iCloud data need a design discussion first.
+        Optional. Note that the server is read-only by default: mail writes are opt-in
+        (docs/adr/0004-opt-in-mail-write.md), Calendar and Contacts stay read-only, and any
+        new kind of change to iCloud data needs a design discussion first.

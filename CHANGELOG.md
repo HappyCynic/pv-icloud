@@ -7,6 +7,8 @@ each version.
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-13
+
 ### Added
 
 - `CLAUDE.md` with the rules AI agents must follow in this repository, and
@@ -93,5 +95,6 @@ each version.
   and build provenance; Compose template; host firewall guide for outbound traffic
   (`docs/egress.md`).
 
-[Unreleased]: https://github.com/HappyCynic/pv-icloud/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/HappyCynic/pv-icloud/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/HappyCynic/pv-icloud/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/HappyCynic/pv-icloud/releases/tag/v0.1.0
