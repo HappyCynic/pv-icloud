@@ -1,6 +1,6 @@
-## MODIFIED Requirements
+## ADDED Requirements
 
-### Requirement: Account definitions are validated
+### Requirement: Account and token definitions are validated
 The configuration MUST list at least one account under `accounts`. Each account `id` MUST match
 `[a-z0-9_]+` and be unique. Each account MUST have at least one entry under `tokens`; each token
 MUST have a non-empty `label` and a `sha256` of exactly 64 hexadecimal characters (compared in
@@ -30,6 +30,15 @@ token label and the key.
 - **THEN** loading the config fails with an error naming the token, `mail_write`, `expunge`
   and the allowed actions
 
+#### Scenario: Draft grant
+- **WHEN** `PV_ICLOUD_MAIL_WRITE` is `enabled` and a token has `mail_write: [draft]`
+- **THEN** it loads with the single write action `draft`
+
+#### Scenario: Send grant
+- **WHEN** `PV_ICLOUD_MAIL_WRITE` is `enabled`, the account sets `mail.write.send_from` and a
+  token has `mail_write: [send]`
+- **THEN** it loads with the single write action `send`
+
 #### Scenario: Invalid write limit
 - **WHEN** a token has `max_writes_per_hour: 0`
 - **THEN** loading the config fails with an error naming the token and `max_writes_per_hour`
@@ -48,38 +57,6 @@ token label and the key.
   `send_to: ["example.org"]`
 - **THEN** loading the config fails with an error naming the token and `send_to`
 
-### Requirement: Mail write settings per account
-Each account's `mail` section (merged from `defaults.mail` as usual) MAY contain `write` with
-`protected_folders` (list of folder names, default empty), `archive_folder` (folder name,
-default `Archive`) and `send_from` (a single bare address, default unset). The protected
-folders that apply to an account SHALL be every name listed in
-`defaults.mail.write.protected_folders` and in the account's own
-`mail.write.protected_folders`: an account list adds to the defaults and never replaces them.
-A value of the wrong type, or an unknown key under `mail.write`, SHALL stop startup with an
-error naming the account and key. An account with a token granted `send` and no `send_from`
-SHALL stop startup with an error naming the account, the token label and
-`mail.write.send_from`.
-
-#### Scenario: Defaults and account both protect folders
-- **WHEN** `defaults.mail.write.protected_folders` is `[Taxes]` and an account's is `[Banking]`
-- **THEN** both `Taxes` and `Banking` are protected for that account
-
-#### Scenario: Archive folder override
-- **WHEN** an account sets `mail.write.archive_folder: Old Mail`
-- **THEN** `mail_archive` for that account moves messages to `Old Mail`
-
-#### Scenario: Send without a From address
-- **WHEN** a token has `mail_write: [send]` and its account has no `mail.write.send_from`
-- **THEN** loading the config fails with an error naming the account, the token and
-  `mail.write.send_from`
-
-#### Scenario: Invalid From address
-- **WHEN** an account sets `mail.write.send_from: not-an-address`
-- **THEN** loading the config fails with an error naming the account and
-  `mail.write.send_from`
-
-## ADDED Requirements
-
 ### Requirement: Warning for unrestricted sending
 At startup, while `PV_ICLOUD_MAIL_WRITE` is `enabled`, the server SHALL log one warning for
 each token that has `send` and no `send_to`: `token <label> of account <id> may send mail to
@@ -95,3 +72,50 @@ any other address.
 #### Scenario: Token with an allowlist
 - **WHEN** every token with `send` has `send_to`
 - **THEN** no such warning is logged
+
+## MODIFIED Requirements
+
+### Requirement: Mail write settings per account
+Each account's `mail` section (merged from `defaults.mail` as usual) MAY contain `write` with
+`protected_folders` (list of folder names, default empty), `archive_folder` (folder name,
+default `Archive`) and `send_from` (a single bare address `local@domain`, default unset). The
+protected folders that apply to an account SHALL be every name listed in
+`defaults.mail.write.protected_folders` and in the account's own
+`mail.write.protected_folders`: an account list adds to the defaults and never replaces them.
+`send_from` SHALL be taken from the account, or else from `defaults.mail.write`. A value of
+the wrong type, a `send_from` that is not one bare address, or an unknown key under
+`mail.write`, SHALL stop startup with an error naming the account and key. An account with a
+token granted `send` and no `send_from` SHALL stop startup with an error naming the account,
+the token label and `mail.write.send_from`.
+
+#### Scenario: Defaults and account both protect folders
+- **WHEN** `defaults.mail.write.protected_folders` is `[Taxes]` and an account's is `[Banking]`
+- **THEN** both `Taxes` and `Banking` are protected for that account
+
+#### Scenario: Archive folder override
+- **WHEN** an account sets `mail.write.archive_folder: Old Mail`
+- **THEN** `mail_archive` for that account moves messages to `Old Mail`
+
+#### Scenario: From address for drafts
+- **WHEN** `defaults.mail.write.send_from` is `me@example.com` and an account sets none
+- **THEN** that account's drafts carry `From: me@example.com`
+
+#### Scenario: Send without a From address
+- **WHEN** a token has `mail_write: [send]` and its account has no `mail.write.send_from`
+- **THEN** loading the config fails with an error naming the account, the token and
+  `mail.write.send_from`
+
+#### Scenario: Invalid From address
+- **WHEN** an account sets `mail.write.send_from` to `not-an-address` or
+  `Me <me@example.com>`
+- **THEN** loading the config fails with an error naming the account and
+  `mail.write.send_from`
+
+## REMOVED Requirements
+
+### Requirement: Account definitions are validated
+**Reason**: Replaced by "Account and token definitions are validated". The old requirement
+had the scenario "Send is not yet an action", which `send` makes false, and a MODIFIED block
+cannot drop a scenario.
+**Migration**: None for operators. Configs that loaded before still load; `send` and
+`send_to` are new optional keys.

@@ -6,10 +6,10 @@
 It enforces the read and write rules (CLAUDE.md, ADR-0004). Reads: EXAMINE, and BODY.PEEK
 or `(UID FLAGS)` fetches only. Writes, only on a SELECTed folder: `UID COPY` of one UID
 (answered with COPYUID), `UID STORE` of one UID with exactly `+FLAGS.SILENT (\\Deleted)`, and
-`UID EXPUNGE` of one UID. A new message only with `APPEND <folder> (\\Draft \\Seen)` (a draft,
-answered with APPENDUID). Every other form (STORE, COPY, EXPUNGE, CLOSE, MOVE, APPEND with
-other flags, UID sets or ranges, other flags) raises, so a test fails if the server ever
-sends one.
+`UID EXPUNGE` of one UID. A new message only with `APPEND "Drafts" (\\Draft \\Seen)` (a
+draft) or `APPEND "Sent Messages" (\\Seen)` (a sent copy), answered with APPENDUID. Every
+other form (STORE, COPY, EXPUNGE, CLOSE, MOVE, APPEND into other folders or with other flags,
+UID sets or ranges, other flags) raises, so a test fails if the server ever sends one.
 
 Like iCloud (checked 2026-10-12) it advertises UIDPLUS and UNSELECT but not MOVE, marks
 `Deleted Messages` as \\Trash, and gives `Archive` and `Drafts` no special-use attribute.
@@ -53,6 +53,8 @@ CAPABILITIES = (
     "IMAP4REV1", "IDLE", "CONDSTORE", "QRESYNC", "ESEARCH", "ENABLE", "UIDPLUS", "UNSELECT",
 )  # fmt: skip
 _ONE_UID = re.compile(r"[1-9][0-9]*")
+# The only folders a new message may be appended to, and its exact flags there.
+APPEND_FLAGS = {"Drafts": "(\\Draft \\Seen)", "Sent Messages": "(\\Seen)"}
 
 
 class FakeServer:
@@ -71,6 +73,7 @@ class FakeServer:
         self.fail_expunge = False
         self.appenduid = "ok"  # "ok" or "omit" (saved, but no APPENDUID)
         self.fail_append = False
+        self.fail_header_search = False  # UID SEARCH HEADER answers NO
 
     def folder(self, name: str) -> FakeFolder:
         if name not in self.folders:
@@ -307,19 +310,23 @@ class FakeConn:
         return "OK", [None]
 
     def append(self, mailbox, flags, date_time, message):
-        """imaplib's APPEND. Only a draft: exactly `(\\Draft \\Seen)`, no date, one message."""
+        """imaplib's APPEND, with no date and one message. Only a draft into Drafts, flagged
+        exactly `(\\Draft \\Seen)`, or a sent copy into Sent Messages, flagged `(\\Seen)`."""
         self._log("APPEND", mailbox, flags)
-        if flags != "(\\Draft \\Seen)" or date_time is not None:
-            raise AssertionError(f"APPEND {flags} {date_time} is forbidden")
+        name = utf7.decode(_unq(mailbox))
+        if flags != APPEND_FLAGS.get(name, "(\\Draft \\Seen)") or date_time is not None:
+            raise AssertionError(f"APPEND {mailbox} {flags} {date_time} is forbidden")
         if not isinstance(message, bytes) or not message:
             raise AssertionError("APPEND needs one message as bytes")
         dest = self._folder(mailbox)
         if self.s.fail_append or dest is None or dest.noselect:
             return "NO", [b"[TRYCREATE] APPEND failed"]
+        if name not in APPEND_FLAGS:
+            raise AssertionError(f"APPEND into {name} is forbidden")
         # imaplib maps bare LF to CRLF before sending; store what iCloud would receive.
         raw = re.sub(rb"\r?\n", b"\r\n", message)
         uid = self.s.deliver(dest.name, raw)
-        dest.messages[uid].flags = {"\\Draft", "\\Seen"}
+        dest.messages[uid].flags = set(flags.strip("()").split())
         if self.s.appenduid == "ok":
             self._responses["APPENDUID"] = [f"{dest.uidvalidity} {uid}".encode()]
         return "OK", [b"APPEND completed"]
@@ -359,6 +366,16 @@ class FakeConn:
                 msgs = [m for m in msgs if val.lower() in str(parsed[m.uid][key] or "").lower()]
             elif key == "TEXT":
                 msgs = [m for m in msgs if val.lower().encode() in m.raw.lower()]
+            elif key == "HEADER":  # HEADER <field> <value>: substring, case-insensitive
+                value = _unq(tokens[i]) if i < len(tokens) else ""
+                i += 1
+                if self.s.fail_header_search:
+                    return "NO", [b"SEARCH failed"]
+                msgs = [
+                    m
+                    for m in msgs
+                    if any(value.lower() in str(v).lower() for v in parsed[m.uid].get_all(val, []))
+                ]
             else:
                 raise AssertionError(f"unsupported SEARCH key {key}")
         return "OK", [" ".join(str(m.uid) for m in msgs).encode()]

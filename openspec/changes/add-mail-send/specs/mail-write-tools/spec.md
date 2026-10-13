@@ -4,18 +4,19 @@
 Each of `mail_move`, `mail_archive`, `mail_delete`, `mail_draft` and `mail_send` SHALL be
 available to a caller only when `PV_ICLOUD_MAIL_WRITE` is `enabled` and the caller's token
 lists the matching action (`move`, `archive`, `delete`, `draft`, `send`) in `mail_write`.
-Each action SHALL be granted independently of the others; in particular `draft` SHALL NOT
-allow sending and `send` SHALL NOT allow drafting. A tool not granted SHALL be absent from the
+Each action SHALL be granted independently of the others; in particular, `draft` SHALL NOT
+grant sending and `send` SHALL NOT grant drafting. A tool not granted SHALL be absent from the
 caller's `tools/list`, and a call to it SHALL fail with the same tool error as a call to a
 tool that does not exist, without contacting iCloud.
 
 #### Scenario: Only archive granted
 - **WHEN** a token has `mail_write: [archive]` and calls `tools/list`
-- **THEN** the list contains every read tool and `mail_archive`, and neither `mail_move` nor
-  `mail_delete`
+- **THEN** the list contains every read tool and `mail_archive`, and none of `mail_move`,
+  `mail_delete`, `mail_draft` and `mail_send`
 
 #### Scenario: Calling a tool that was not granted
-- **WHEN** a token with `mail_write: [archive]` calls `mail_delete` directly
+- **WHEN** a token with `mail_write: [archive]` calls `mail_delete`, `mail_draft` or
+  `mail_send` directly
 - **THEN** the call fails as an unknown tool and the IMAP server sees no command
 
 #### Scenario: Two tokens for one account
@@ -23,6 +24,10 @@ tool that does not exist, without contacting iCloud.
   for the same account
 - **THEN** `laptop` can move and delete messages, and `phone` sees only the read tools and
   cannot change anything
+
+#### Scenario: Draft without send
+- **WHEN** a token has `mail_write: [draft]` and calls `tools/list`
+- **THEN** the list contains every read tool and `mail_draft`, and no tool that sends mail
 
 #### Scenario: Draft does not allow sending
 - **WHEN** a token has `mail_write: [draft]` and calls `mail_send` directly
@@ -174,7 +179,10 @@ using only read commands (`EXAMINE` and `UID SEARCH HEADER Message-ID`). If it f
 message, it SHALL NOT append. Otherwise, or if the check fails, it SHALL `APPEND` one copy
 with the flag `\Seen`. That copy SHALL include a `Bcc` header listing the Bcc addresses.
 `sent_copy_saved` SHALL be true when a copy was found or appended. If the append fails, the
-call SHALL still succeed, with `sent_copy_saved: false` and `sent_copy_id: null`.
+call SHALL still succeed, with `sent_copy_saved: false` and `sent_copy_id: null`. Protected
+folders SHALL NOT apply to `mail_send` or to the sent copy; the `send` grant is the control.
+After a message is sent and Sent Messages is in the read scope, the account's sync worker
+SHALL be asked to resync it.
 
 #### Scenario: iCloud files its own copy
 - **WHEN** the SMTP server puts its own copy of the sent message into Sent Messages

@@ -23,9 +23,17 @@ mail_draft creates one new message, also on a fresh connection, with no SELECT:
 Drafts is found by name (iCloud gives it no special-use attribute). Without UIDPLUS, which
 provides APPENDUID, nothing is attempted.
 
+mail_send, once SMTP has accepted a message and iCloud has not filed a copy of its own,
+saves one copy the same way:
+
+    APPEND <Sent Messages> (\\Seen) {literal}
+
+Sent Messages is the folder marked \\Sent, otherwise the one with iCloud's name.
+
 Nothing else that changes mail is ever sent: no plain STORE, COPY or EXPUNGE, no CLOSE (it
 expunges every \\Deleted message in the folder), no MOVE, no UID sets or ranges, no other
-flags, no APPEND with other flags. tests/test_repo_policy.py enforces this.
+flags, no APPEND into other folders or with other flags. tests/test_repo_policy.py enforces
+this.
 """
 
 from __future__ import annotations
@@ -69,6 +77,10 @@ DRAFT_NO_UIDPLUS = (
 DRAFTS_NOT_FOUND = "Drafts folder not found; nothing was saved"
 APPEND_FAILED = "saving the draft failed; nothing was saved"
 APPEND_LOST = "the connection failed while saving the draft; it may or may not have been saved"
+SENT_NAME = "Sent Messages"
+SENT_NOT_FOUND = "Sent Messages folder not found"
+SENT_APPEND_FAILED = "saving the sent copy failed"
+SENT_APPEND_LOST = "the connection failed while saving the sent copy"
 
 # Folder name -> its LIST attributes, lower-cased; given to the destination resolver.
 Folders = Mapping[str, frozenset[str]]
@@ -94,6 +106,14 @@ def find_trash(folders: Folders) -> str | None:
         if "\\trash" in attrs:
             return name
     return TRASH_NAME if TRASH_NAME in folders else None
+
+
+def find_sent(folders: Folders) -> str | None:
+    """Sent Messages: the folder marked \\Sent, otherwise the one with iCloud's name."""
+    for name, attrs in folders.items():
+        if "\\sent" in attrs:
+            return name
+    return SENT_NAME if SENT_NAME in folders else None
 
 
 def find_archive(folders: Folders, name: str) -> str | None:
@@ -219,3 +239,24 @@ class MailWriter:
             log.warning("draft saved without APPENDUID; its id is unknown")
             return Appended(DRAFTS_NAME, None)
         return Appended(DRAFTS_NAME, MailId(DRAFTS_NAME, *appended))
+
+    def append_sent(self, message: bytes) -> Appended:
+        """Save one copy of a sent message in Sent Messages, flagged \\Seen. Changes nothing
+        else. The id is None when the server does not report it (no UIDPLUS/APPENDUID)."""
+        with self.pool.write_connection() as client:
+            sent = find_sent(client.folder_attributes())  # even if hidden from reads
+            if sent is None:
+                raise WriteFailed(SENT_NOT_FOUND)
+            conn = client.conn
+            assert conn is not None
+
+            conn.response("APPENDUID")  # drop any stale response code before APPEND
+            try:
+                typ, data = conn.append(quote(sent), "(\\Seen)", None, message)
+                codes = conn.response("APPENDUID")[1]
+            except ImapErrors as exc:
+                raise WriteFailed(SENT_APPEND_LOST) from exc
+            if typ != "OK":
+                raise WriteFailed(SENT_APPEND_FAILED)
+        appended = _appended_uid(codes)
+        return Appended(sent, MailId(sent, *appended) if appended else None)
