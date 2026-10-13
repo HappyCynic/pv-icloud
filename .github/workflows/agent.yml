@@ -26,7 +26,7 @@ jobs:
       issues: write # clear the trigger label afterwards
       id-token: write # Claude GitHub App token exchange
     steps:
-      - uses: HappyCynic/.github/actions/agent-sdlc@88e6adbd1a21ae31afbe6f838c4750d24f1c9b08 # main 2026-10-11
+      - uses: HappyCynic/.github/actions/agent-sdlc@cd0c50197a1920572b7a5d7c23d83e51eff56abe # main 2026-10-13
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           openspec_version: 1.13.2 # must match CLAUDE.md
