@@ -3,8 +3,8 @@
 ## Context
 
 `add-mail-write-core` added the deployment switch, per-token grants, protected folders, the
-write rate limit and the guarded move. `add-mail-draft` (#17) adds `mail_draft` and `APPEND`
-into Drafts. This change is the last of the three. It follows the core design
+write rate limit and the guarded move. `add-mail-draft` (#17, archived) added `mail_draft`,
+`mail/compose.py` and `APPEND` into Drafts. This change is the last of the three. It follows the core design
 (`openspec/changes/archive/2026-10-12-add-mail-write-core/design.md`, decisions 2, 4, 5, 7, 8,
 9 and 10 as marked `add-mail-send`) and only records here what it fills in or changes. Where
 this file is silent, the core design applies.
@@ -231,7 +231,31 @@ No migration. Existing configs behave as before. To enable sending: keep
 `send_to`, and allow `smtp.mail.me.com:587` in any egress rules (docs/egress.md). Rollback:
 remove `send` and restart.
 
+## Decisions made while implementing
+
+- **Startup warning in `Runtime`.** The warnings come from `config.send_warnings()` and are
+  logged where the server already warns that mail writes are enabled (`Runtime.__init__`),
+  not in `__main__`, so the tests cover them.
+- **7-bit body.** `mail/compose.py`'s draft builder emits an 8-bit body. Over SMTP that needs
+  `BODY=8BITMIME`, so `build_outgoing()` uses the SMTP policy with `cte_type="7bit"`
+  (quoted-printable or base64 as needed). Drafts are unchanged.
+- **Message-ID domain.** Drafts keep the fixed `pv-icloud.invalid`; sent mail uses the
+  domain of `send_from`, as decision 3 says. Neither ever uses this host's name.
+- **SMTP steps run one by one** (`mail`, `rcpt` per recipient, `data`) rather than through
+  `sendmail()`, so a failure during `DATA` is told apart from a refusal before it, and the
+  module refuses an SSL context that does not verify the certificate and host name.
+- **Sent copy without UIDPLUS.** Unlike a draft, the sent copy is appended even without
+  `UIDPLUS`; only `sent_copy_id` is then null. Failing the copy would not unsend the mail.
+- **The SDK's tool-error log.** The MCP SDK logs every tool error's text at INFO, which for a
+  `send_to` refusal would put addresses in the log. A logging filter on that SDK logger
+  replaces the text with its length, for every tool.
+- **Result** also has `in_reply_to` (null without one), as `mail_draft`'s result does.
+
 ## Open Questions
+
+No maintainer answers had arrived when this change was implemented; the implementation
+follows the proposed answers (1: protected folders do not apply; 3: success with
+`refused_recipients`). Question 2 still needs checking on a live account.
 
 1. **Protected folders and Sent Messages.** This design does not apply protected folders to
    the sent-copy append, matching how `mail_draft` is expected to treat Drafts. Should a

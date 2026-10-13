@@ -12,12 +12,17 @@ rules below add the same limit at the network level, for everything the containe
 | `imap.mail.me.com` | 993 | Mail (IMAP over TLS) |
 | `caldav.icloud.com`, `pNN-caldav.icloud.com` | 443 | Calendar (CalDAV) |
 | `contacts.icloud.com`, `pNN-contacts.icloud.com` | 443 | Contacts (CardDAV) |
+| `smtp.mail.me.com` | 587 | Sending mail (SMTP with STARTTLS); only `mail_send` calls, only when some token is granted `send` |
 | Your DNS resolver | 53 | Name lookups |
 | Publishers of subscribed calendars | 443 (or 80) | Only with `calendar.subscriptions: true` |
 
 All the iCloud hosts above resolved inside **17.0.0.0/8** (Apple's own network) when checked
 on 2026-10-09. Apple can change this; if mail or calendar stop working after you apply the
-rules, check with `getent ahosts imap.mail.me.com` and `getent ahosts caldav.icloud.com`.
+rules, check with `getent ahosts imap.mail.me.com` and `getent ahosts caldav.icloud.com`
+(and `getent ahosts smtp.mail.me.com` if you send mail).
+
+Without a token granted `send`, nothing connects to port 587, so leave it closed. Opening it
+only when you grant `send` keeps the tightest rules.
 
 Subscribed-calendar publishers can be any public host, so with subscriptions on the best a
 network rule can do is block private and local addresses. Leave subscriptions off
@@ -49,6 +54,13 @@ the host's iptables; use their own network settings instead.)
    iptables -A PV_ICLOUD_EGRESS -j REJECT
    iptables -C DOCKER-USER -s "$SUBNET" -j PV_ICLOUD_EGRESS 2>/dev/null \
      || iptables -I DOCKER-USER -s "$SUBNET" -j PV_ICLOUD_EGRESS
+   ```
+
+   **With a token granted `send`**, add this rule before the `REJECT` line, so `mail_send`
+   can reach iCloud SMTP:
+
+   ```sh
+   iptables -I PV_ICLOUD_EGRESS -d 17.0.0.0/8 -p tcp --dport 587 -j RETURN
    ```
 
    **With subscriptions on**, replace the `REJECT` line with these, so feeds can come from
@@ -84,6 +96,7 @@ enable IPv6 on its network, add the same rules with `ip6tables`.
 
 ## Other ways
 
-- **Kubernetes:** a `NetworkPolicy` with `egress` to `17.0.0.0/8` on 443 and 993 plus DNS.
+- **Kubernetes:** a `NetworkPolicy` with `egress` to `17.0.0.0/8` on 443 and 993 (and 587
+  if a token is granted `send`) plus DNS.
 - **Firewall appliance:** match on the container host's address, or on the subnet above if it
   is routed rather than masqueraded.

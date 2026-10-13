@@ -33,7 +33,25 @@ each version.
     Optional `in_reply_to` threads it as a reply without marking the original read. At most
     50 addresses, a 998-character subject and a 100,000-character body. Audit lines carry no
     addresses, subject or body.
-  - `mail.write.send_from` (optional): the `From` address of drafts.
+  - `mail.write.send_from` (optional): the `From` address of drafts and sent mail.
+  - `mail_send`, granted with `mail_write: [send]` (separate from `draft`; needs
+    `mail.write.send_from`): sends one plain-text message through `smtp.mail.me.com:587`,
+    with STARTTLS and a verified certificate required before login. Same inputs and limits
+    as `mail_draft`, plus at least one recipient. Bcc addresses go only into the SMTP
+    envelope. Exactly one copy ends up in Sent Messages: the server appends one (flagged
+    `\Seen`) only if iCloud has not filed its own. Nothing is retried; a send that may or may
+    not have gone through says so.
+  - Per-token `send_to` allowlist of addresses and `@domain` entries: any other recipient is
+    refused before anything is read or sent. A token with `send` and no `send_to` gets a
+    startup warning naming it.
+  - New outbound connection, only for `mail_send`: `smtp.mail.me.com:587`
+    (see docs/egress.md).
+
+### Security
+
+- The MCP SDK's log line for a failed tool call now gives only the length of the error
+  text, so an error that repeats the caller's input (such as addresses refused by
+  `send_to`) never reaches the server log.
 
 ## [0.1.0] - 2026-10-10
 

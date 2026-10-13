@@ -9,14 +9,12 @@ scheduled reports or replies the user has approved in the client. Drafting (`add
 #17) leaves the actual send to a person. A sent message cannot be recalled, so sending needs
 its own grant, and operators need a way to limit who a token can send to.
 
-**Depends on `add-mail-draft` (#17).** The issue says this change starts after
-`add-mail-draft` is merged. That change has not been proposed yet, so this proposal assumes
-the end state from the core design: `draft` is a known action, `mail_draft` exists, the input
-limits and `in_reply_to` handling are shared code, and `APPEND` into Drafts is allowed in
-`mail/imap_write.py`. The MODIFIED requirements below are written on top of that state
-(they mention `draft` and `mail_draft`). If `add-mail-draft` is archived with different
-wording, the implement stage rebases these MODIFIED blocks onto the archived text before
-archiving this change (task 1.1).
+**Depends on `add-mail-draft` (#17)**, which is merged and archived
+(`2026-10-12-add-mail-draft`). The spec deltas here are rebased onto its archived text
+(task 1.1). Because `add-mail-draft` added the scenario "Send is not yet an action" to
+`accounts-and-auth`'s "Account definitions are validated", and a MODIFIED block cannot drop a
+scenario, that requirement is REMOVED and replaced by "Account and token definitions are
+validated".
 
 ## What Changes
 

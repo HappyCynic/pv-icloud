@@ -64,6 +64,7 @@ client and a CardDAV client with an in-memory contacts cache.
 | `mail_archive` | *Opt-in write.* Moves one message to the archive folder |
 | `mail_delete` | *Opt-in write.* Moves one message to Deleted Messages (never a permanent delete) |
 | `mail_draft` | *Opt-in write.* Saves one plain-text draft in Drafts, optionally as a reply; never sends |
+| `mail_send` | *Opt-in write.* Sends one plain-text message through iCloud SMTP and keeps one copy in Sent Messages; cannot be undone |
 
 The write tools exist only with `PV_ICLOUD_MAIL_WRITE=enabled` and are listed only to tokens
 granted them; see [Mail writes](#mail-writes).
@@ -123,10 +124,11 @@ folder's rows on the next sync.
 Decided in [ADR-0004](adr/0004-opt-in-mail-write.md). Three layers have to agree before mail
 changes:
 
-1. **Deployment switch.** `PV_ICLOUD_MAIL_WRITE=enabled`. Without it `mail/imap_write.py` is
-   never imported, no write tool is registered, and a token with `mail_write` is a config
-   error. Any value other than `enabled`, `disabled` or empty is a config error too.
-2. **Per-token grant.** `mail_write: [move, archive, delete, draft]`, each action on its own. The
+1. **Deployment switch.** `PV_ICLOUD_MAIL_WRITE=enabled`. Without it `mail/imap_write.py` and
+   `mail/smtp.py` are never imported, no write tool is registered, and a token with
+   `mail_write` is a config error. Any value other than `enabled`, `disabled` or empty is a
+   config error too.
+2. **Per-token grant.** `mail_write: [move, archive, delete, draft, send]`, each action on its own. The
    server lists each token only its granted write tools (SDK middleware filters `tools/list`)
    and refuses the others exactly as it refuses a tool that does not exist. A token with
    write actions gets server instructions naming them; a token without gets the read-only
@@ -176,13 +178,54 @@ characters; not entirely empty), then:
    call still succeeds with `id: null`, so a caller has no reason to retry into a duplicate.
 4. If Drafts is in the read scope, the sync worker resyncs it.
 
-There is no SMTP code: nothing is sent, and a person sends the draft from Mail. Protected
-folders fence moves only; the `draft` grant is what controls drafting.
+`mail_draft` sends nothing and opens no SMTP connection: a person sends the draft from Mail.
+Protected folders fence moves only; the `draft` grant is what controls drafting.
+
+**Sending.** `mail_send` (grant `send`, separate from `draft`) is the only code path that
+sends mail, and a sent message cannot be recalled, so every refusal happens before the SMTP
+connection:
+
+1. The draft input limits, plus at least one recipient.
+2. The token's `send_to`, if it has one: every `to`, `cc` and `bcc` address, lower-cased,
+   must equal an address entry or have exactly the domain of an `@domain` entry
+   (`@example.org` does not match `a@mail.example.org`). Otherwise the call fails naming
+   only the refused addresses, before anything is read. Replying to someone does not add
+   them. A token with `send` and no `send_to` may send anywhere and is named in a startup
+   warning.
+3. With `in_reply_to`, the original is read like `mail_get`, as for drafts.
+4. `LIST` on a read connection finds Sent Messages (the `\Sent` folder, else the one with
+   that name), even when hidden from reads; without one the call fails here.
+5. `mail/compose.py` builds the message: `From` is `mail.write.send_from` (required for
+   `send`), the `Message-ID` is on that address's domain, and the body is 7-bit clean
+   (quoted-printable or base64), so it needs no `8BITMIME`. The bytes sent have no `Bcc`
+   header; the Bcc addresses go only into the SMTP envelope.
+6. `mail/smtp.py`, the only module that imports `smtplib`, connects to
+   `smtp.mail.me.com:587` with a 30-second timeout. It requires `STARTTLS` with
+   `ssl.create_default_context()` (certificate and host name verified, and the module
+   refuses any context that does not verify) before `AUTH`; a server that does not offer
+   it, or a failed handshake, gets nothing more. Then `MAIL FROM`, `RCPT TO` for each
+   recipient, `DATA`. All recipients refused means nothing was sent; some refused is a
+   success that lists them in `refused_recipients`. A connection lost during `DATA` is
+   reported as "may have been sent; check Sent Messages", and nothing is retried. Errors
+   and logs never carry the server's reply text, which can echo addresses.
+7. Exactly one copy in Sent Messages: on a read connection, `EXAMINE` and
+   `UID SEARCH HEADER Message-ID "<id>"`. If iCloud filed its own copy, nothing is
+   appended; otherwise (or if that check fails) one `APPEND <Sent Messages> (\Seen)` of the
+   message with its `Bcc` header, as mail clients keep it. If that append fails the call
+   still succeeds (the mail has gone) with `sent_copy_saved: false`. If Sent Messages is in
+   the read scope, the sync worker resyncs it.
+
+Protected folders do not apply to sending or to the sent copy; the `send` grant (and
+`send_to`) is the control. The MCP SDK logs each tool error's text at INFO; a logging filter
+reduces it to its length, so refused addresses never reach the log.
 
 `tests/test_repo_policy.py` inspects the code's IMAP call sites: only `mail/imap_write.py`
 may `SELECT`, and only with these single-UID forms, and `APPEND` only with exactly
-`(\Draft \Seen)`; nothing may `STORE`, `COPY`, `EXPUNGE`, `CLOSE`, `MOVE` or touch folders.
-The fake IMAP server rejects every other form at run time.
+`(\Draft \Seen)` or `(\Seen)`; nothing may `STORE`, `COPY`, `EXPUNGE`, `CLOSE`, `MOVE` or
+touch folders. It also checks that only `mail/smtp.py` imports `smtplib`. The fake IMAP
+server rejects every other form at run time (an `APPEND` only into Drafts or Sent Messages,
+each with its own flags), and the fake SMTP server fails a test that sends `AUTH`, `MAIL` or
+`DATA` before `STARTTLS`.
 
 ## Calendar
 

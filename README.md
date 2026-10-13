@@ -52,6 +52,7 @@ granted on its own; a token sees only the tools it was granted, and a token with
 | `mail_archive` | `archive` | Move one message to the archive folder (`Archive`, found by name) |
 | `mail_delete` | `delete` | Move one message to `Deleted Messages`; it stays recoverable there until iCloud empties that folder. Nothing is ever deleted permanently. |
 | `mail_draft` | `draft` | Save one plain-text draft in `Drafts` (found by name, even when hidden from reads) for a person to review and send from their mail app. Nothing is ever sent. |
+| `mail_send` | `send` | Send one plain-text message from `mail.write.send_from` through iCloud SMTP, and keep one copy in `Sent Messages`. **Cannot be undone.** |
 
 - One message per call; a move's result has the message's `new_id`.
 - **Drafts:** optional `to`, `cc`, `bcc`, `subject`, `body` and `in_reply_to` (a message id,
@@ -61,6 +62,27 @@ granted on its own; a token sees only the tools it was granted, and a token with
   `APPEND` flagged `\Draft \Seen`, and its `From` is `mail.write.send_from` when set (Mail
   fills in the default sender otherwise). `draft` does not grant sending; protected folders
   do not apply to drafts.
+- **Sending:** the same inputs and limits as drafts, with at least one recipient.
+  `mail.write.send_from` is required for an account with a `send` token (use the account's
+  iCloud address or one of its aliases). The server connects to `smtp.mail.me.com:587` only
+  for a `mail_send` call; it requires STARTTLS with a verified certificate before logging in,
+  and gives up after 30 seconds. `bcc` addresses go only into the SMTP envelope, never into
+  the message the other recipients get. After sending, the server looks for the message in
+  `Sent Messages` by its Message-ID and appends one copy (flagged `\Seen`, with the `Bcc`
+  header) only if iCloud has not filed one. Nothing is retried: if the connection drops
+  while the message is being sent, the call says it may have been sent, to check Sent
+  Messages first. `send` does not grant drafting, and protected folders do not apply.
+- **`send_to`** (per token, optional): the only recipients this token may send to, as exact
+  addresses or `@domain` entries (`@example.org` matches that domain only, not
+  `mail.example.org`; case is ignored). If any `to`, `cc` or `bcc` address is not on the
+  list, nothing is read or sent, and the error names the refused addresses. Replying does not
+  add the original sender. Without `send_to` the token may send to anyone, and the server
+  logs a warning naming the token at startup.
+
+  > **Prefer `draft` over `send`.** A client that can send can be tricked by text in a
+  > message into sending mail you did not intend, and sent mail cannot be recalled. If a
+  > client must send, give its token a `send_to` list and a client that confirms every
+  > message with you.
 - **Guarded move:** iCloud has no IMAP `MOVE`, so the message is copied (`UID COPY`), and
   only once the server confirms that copy (`COPYUID`) is the original marked `\Deleted` and
   expunged, by its UID alone. If a step fails, the error says where the message is; it is
@@ -69,7 +91,8 @@ granted on its own; a token sees only the tools it was granted, and a token with
   a token's own `protected_folders`): nothing moves into or out of them.
 - **Write limit** per token: `max_writes_per_hour` (default 30), counted in memory; a restart
   resets it.
-- Write calls are audited with `"write": true` and no folder names.
+- Write calls are audited with `"write": true` and no folder names, addresses, subjects or
+  bodies.
 
 Prompt injection in mail can now cause actions, not just reads. Grant writes only to clients
 that confirm actions with a person; see [SECURITY.md](SECURITY.md).
@@ -124,7 +147,8 @@ See [SECURITY.md](SECURITY.md) for how to report a vulnerability and the threat 
 - **No TLS** in the server itself: run it on a private network (LAN, VPN, Tailscale) or
   behind a TLS reverse proxy. Do not expose it directly to the internet.
 - The index holds **mail bodies**: put `/data` on an encrypted disk.
-- **Outbound requests** go to iCloud and, for subscribed calendars, to each feed's publisher.
+- **Outbound requests** go to iCloud (including `smtp.mail.me.com:587`, only for `mail_send`
+  calls by a token granted `send`) and, for subscribed calendars, to each feed's publisher.
   Feed requests carry no iCloud credentials, must resolve to public addresses (a feed URL
   cannot reach your LAN; the connection goes to the address that was checked), are size- and
   time-limited, and feed URLs (which often contain private tokens) are never logged or
@@ -182,7 +206,7 @@ See [`config/pv-icloud.example.yaml`](config/pv-icloud.example.yaml). Per accoun
 | `mail.max_connections` | `2` | IMAP connections (iCloud limits per Apple ID); one is reserved for sync |
 | `mail.write.protected_folders` | `[]` | No mail write moves messages into or out of these folders; an account's list adds to the defaults' |
 | `mail.write.archive_folder` | `Archive` | Where `mail_archive` moves messages |
-| `mail.write.send_from` | unset | `From` of drafts (one bare address, `local@domain`); unset: no `From`, and Mail fills in the default sender |
+| `mail.write.send_from` | unset | `From` of drafts and sent mail (one bare address, `local@domain`); required when a token of the account has `send`; unset: drafts have no `From`, and Mail fills in the default sender |
 | `calendar.calendars.include` / `exclude` | `"*"` / `[]` | Calendar scope (display names, globs allowed) |
 | `calendar.max_range_days` | `90` | Longest `calendar_events` range |
 | `calendar.max_search_days` | `730` | Longest `calendar_search` range |
@@ -195,9 +219,10 @@ Per token (under `accounts[].tokens[]`, besides `label` and `sha256`):
 
 | Key | Default | Meaning |
 |---|---|---|
-| `mail_write` | `[]` | Mail write actions this token may use: `move`, `archive`, `delete`, `draft`. Needs `PV_ICLOUD_MAIL_WRITE=enabled`, otherwise startup fails |
+| `mail_write` | `[]` | Mail write actions this token may use: `move`, `archive`, `delete`, `draft`, `send`. Needs `PV_ICLOUD_MAIL_WRITE=enabled`, otherwise startup fails |
 | `protected_folders` | `[]` | Added to the account's protected folders for this token only |
 | `max_writes_per_hour` | `30` | This token's write limit (sliding hour, held in memory) |
+| `send_to` | unset (anyone) | Only with `send`: the recipients `mail_send` may reach, as bare addresses or `@domain` entries. Unset: anyone, with a startup warning |
 
 Environment: `PV_ICLOUD_CONFIG` (config path), `PV_ICLOUD_DATA_DIR` (index root),
 `PV_ICLOUD_PORT` (default 8771), `PV_ICLOUD_HOST` (default `127.0.0.1`; the image sets
