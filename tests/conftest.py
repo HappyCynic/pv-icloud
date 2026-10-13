@@ -87,7 +87,8 @@ def server():
 class Harness:
     """One account wired to a FakeServer: index, sync, pool, service."""
 
-    def __init__(self, server: FakeServer, account, data_dir, *, write=False):
+    def __init__(self, server: FakeServer, account, data_dir, *, write=False, smtp=None):
+        """`smtp`: a FakeSmtp that mail_send delivers to (needs `write`)."""
         self.server = server
         self.account = account
         self.index = MailIndex(data_dir / account.id / "mail.sqlite3")
@@ -100,12 +101,18 @@ class Harness:
 
         self.sync = MailSync(account, self.index, sync_client)
         self.pool = ImapPool(account.icloud_user, account.app_password, 1, factory)
-        writer = None
+        writer = sender = None
         if write:
             from pv_icloud.mail.imap_write import MailWriter
 
             writer = MailWriter(self.pool)
-        self.service = MailService(account, self.index, self.pool, self.sync, writer=writer)
+        if smtp is not None:
+            from pv_icloud.mail.smtp import SmtpSender
+
+            sender = SmtpSender(account.icloud_user, account.app_password, smtp.endpoint)
+        self.service = MailService(
+            account, self.index, self.pool, self.sync, writer=writer, sender=sender
+        )
         self._client = None
 
     def run_sync(self) -> int:
@@ -118,3 +125,22 @@ class Harness:
 def harness(server, tmp_path):
     cfg = make_config(tmp_path)
     return Harness(server, cfg.account("alice"), tmp_path)
+
+
+@pytest.fixture(scope="session")
+def test_cert():
+    from .fakesmtp import make_cert
+
+    return make_cert()
+
+
+@pytest.fixture
+def smtp(test_cert):
+    """A running fake SMTP server; the test fails if anything was sent before STARTTLS."""
+    from .fakesmtp import FakeSmtp
+
+    fake = FakeSmtp(test_cert)
+    fake.start()
+    yield fake
+    fake.stop()
+    assert fake.violations == []

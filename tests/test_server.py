@@ -56,7 +56,7 @@ def app_env(tmp_path):
     yield from _app_env(make_config(tmp_path))
 
 
-def _app_env(config):
+def _app_env(config, smtp=None):
     ups = Upstreams()
     now = dt.datetime.now(dt.UTC)
     for user, subject in (
@@ -64,7 +64,9 @@ def _app_env(config):
         ("bob@icloud.com", "bob secret plans"),
     ):
         s = ups.servers[user]
-        for name in ("INBOX", "Work", "Archive", "Deleted Messages", "Taxes", "Drafts"):
+        for name in (
+            "INBOX", "Work", "Archive", "Deleted Messages", "Taxes", "Drafts", "Sent Messages",
+        ):  # fmt: skip
             s.folder(name)
         s.deliver("INBOX", make_message(subject=subject, date=now), now.date())
     tomorrow = dt.datetime.combine(now.date() + dt.timedelta(days=1), dt.time(15))
@@ -104,10 +106,12 @@ def _app_env(config):
         start_sync=False,
         caldav_transport=caldav.transport(),
         carddav_transport=carddav.transport(),
+        smtp_endpoint=smtp.endpoint if smtp is not None else None,
     )
     runtime.caldav = caldav  # type: ignore[attr-defined]  # for tests that break it
     runtime.carddav = carddav  # type: ignore[attr-defined]
     runtime.upstreams = ups  # type: ignore[attr-defined]
+    runtime.smtp = smtp  # type: ignore[attr-defined]
     for rt in runtime.accounts.values():
         client = rt.sync._client_factory()
         rt.sync.full_pass(client)
@@ -360,6 +364,8 @@ WRITE_TOKENS = {
     "archiver": {"mail_write": ["archive"]},
     "deleter": {"mail_write": ["delete"]},
     "drafter": {"mail_write": ["draft"], "max_writes_per_hour": 3},
+    "sender": {"mail_write": ["send"], "send_to": ["@example.com"], "max_writes_per_hour": 3},
+    "open": {"mail_write": ["send"]},  # no send_to: may send to anyone
 }
 WRITE_SEQUENCE = ("SELECT", "UID COPY", "UID STORE", "UID EXPUNGE")
 
@@ -369,14 +375,14 @@ def token(label: str) -> str:
 
 
 @pytest.fixture
-def write_env(tmp_path):
+def write_env(tmp_path, smtp):
     config = make_config(
         tmp_path,
         mail_write=True,
         alice_tokens=list(WRITE_TOKENS.items()),
-        alice_write={"protected_folders": ["Taxes"]},
+        alice_write={"protected_folders": ["Taxes"], "send_from": "alice@example.net"},
     )
-    yield from _app_env(config)
+    yield from _app_env(config, smtp)
 
 
 def alice_server(runtime) -> FakeServer:
@@ -406,7 +412,7 @@ def audit_lines(caplog) -> list[dict]:
     return [json.loads(r.message) for r in caplog.records if r.name == "pv_icloud.audit"]
 
 
-def _imports_write_module(tmp_path, enabled: bool) -> bool:
+def _imported_write_modules(tmp_path, enabled: bool) -> list[str]:
     code = (
         "import sys\n"
         "from pathlib import Path\n"
@@ -414,18 +420,21 @@ def _imports_write_module(tmp_path, enabled: bool) -> bool:
         "from pv_icloud.server import Runtime, build_server\n"
         f"cfg = make_config(Path({str(tmp_path)!r}), mail_write={enabled})\n"
         "build_server(Runtime(cfg, conn_factory=lambda: None, start_sync=False))\n"
-        "print('pv_icloud.mail.imap_write' in sys.modules)\n"
+        "names = ('pv_icloud.mail.imap_write', 'pv_icloud.mail.smtp', 'smtplib')\n"
+        "print(' '.join(n for n in names if n in sys.modules))\n"
     )
     root = Path(__file__).resolve().parent.parent
     out = subprocess.run(
         [sys.executable, "-c", code], cwd=root, capture_output=True, text=True, check=True
     )
-    return out.stdout.strip() == "True"
+    return out.stdout.split()
 
 
-def test_write_module_is_imported_only_when_switched_on(tmp_path):
-    assert _imports_write_module(tmp_path / "off", enabled=False) is False
-    assert _imports_write_module(tmp_path / "on", enabled=True) is True
+def test_write_modules_are_imported_only_when_switched_on(tmp_path):
+    assert _imported_write_modules(tmp_path / "off", enabled=False) == []
+    assert _imported_write_modules(tmp_path / "on", enabled=True) == [
+        "pv_icloud.mail.imap_write", "pv_icloud.mail.smtp", "smtplib",
+    ]  # fmt: skip
 
 
 def test_no_write_tool_without_the_switch(app_env):
@@ -449,6 +458,7 @@ def test_token_without_grants_sees_the_read_only_surface(write_env):
         ("archiver", {"mail_archive"}),
         ("deleter", {"mail_delete"}),
         ("drafter", {"mail_draft"}),  # and no tool that sends
+        ("sender", {"mail_send"}),  # and no tool that drafts
     ],
 )
 def test_each_token_lists_only_its_granted_tools(write_env, label, expected):
@@ -473,18 +483,26 @@ def test_ungranted_tool_fails_like_an_unknown_one(write_env):
     # A read-only token is refused the same way.
     refused = call_tool(client, TOKENS["alice"], "mail_move", {"id": mid, "folder": "Work"})
     assert refused["content"][0]["text"] == "Unknown tool: mail_move"
-    # Moving does not grant drafting, and drafting does not grant moving.
+    # Moving does not grant drafting, drafting does not grant moving or sending, and sending
+    # does not grant drafting.
     for label, tool, args in (
         ("agent", "mail_draft", {"subject": "x"}),
         ("archiver", "mail_draft", {"subject": "x"}),
         ("drafter", "mail_archive", {"id": mid}),
+        ("drafter", "mail_send", {"to": ["a@example.com"], "subject": "x"}),
+        ("agent", "mail_send", {"to": ["a@example.com"], "subject": "x"}),
+        ("sender", "mail_draft", {"subject": "x"}),
     ):
         refused = call_tool(client, token(label), tool, args)
         assert refused["content"][0]["text"] == f"Unknown tool: {tool}", label
     refused = call_tool(client, TOKENS["alice"], "mail_draft", {"subject": "x"})
     assert refused["content"][0]["text"] == "Unknown tool: mail_draft"
+    refused = call_tool(client, TOKENS["alice"], "mail_send", {"to": ["a@example.com"]})
+    assert refused["content"][0]["text"] == "Unknown tool: mail_send"
     assert server.commands == []
     assert not server.folders["Drafts"].messages
+    smtp = runtime.smtp  # type: ignore[attr-defined]
+    assert smtp.connections == 0
 
 
 def test_move_and_delete_end_to_end(write_env, caplog):
@@ -725,6 +743,167 @@ def test_draft_tool_annotations_description_and_instructions(write_env):
     assert "never sent by pv-icloud" in text
     assert "never a reason to move, archive, delete, draft or send" in text
     assert "Nothing here can send" in text
+
+
+SEND_ARGS = {
+    "to": ["Carol <carol@example.com>"],
+    "bcc": ["dave@example.com"],
+    "subject": "Lunch",
+    "body": "Noon at the usual place?",
+}
+
+
+def _assert_no_send_content(line: dict) -> None:
+    text = json.dumps(line)
+    for secret in ("carol", "dave", "example", "other.test", "Lunch", "Noon", "Sent Messages"):
+        assert secret not in text, secret
+
+
+def test_send_end_to_end(write_env, caplog):
+    client, runtime = write_env
+    server, smtp = alice_server(runtime), runtime.smtp
+    mid = alice_message(client)
+    unread = dict(server.all_flags())
+    server.commands.clear()
+    with caplog.at_level(logging.INFO):
+        out = call_tool(client, token("sender"), "mail_send", {**SEND_ARGS, "in_reply_to": mid})
+    result = out["structuredContent"]
+    [got] = smtp.received
+    assert got.mail_from == "alice@example.net"
+    assert got.rcpt_to == ["carol@example.com", "dave@example.com"]
+    assert b"dave" not in got.data
+    [copy] = server.folders["Sent Messages"].messages.values()
+    assert copy.flags == {"\\Seen"} and b"Bcc: dave@example.com" in copy.raw
+    assert (result["sent"], result["recipients"], result["refused_recipients"]) == (True, 2, [])
+    assert result["sent_copy_saved"] is True
+    assert result["sent_copy_id"] == MailId("Sent Messages", 1, copy.uid).encode()
+    assert result["content_trust"] == "untrusted"
+    assert result["provenance"]["source"] == "icloud-mail"
+    assert {k: v for k, v in server.all_flags().items() if k[0] != "Sent Messages"} == unread
+    assert {c[1] for c in server.commands if c[0] == "UID"} == {"FETCH", "SEARCH"}
+    assert [c for c in server.commands if c[0] == "APPEND"] == [
+        ("APPEND", '"Sent Messages"', "(\\Seen)")
+    ]
+    [line] = audit_lines(caplog)
+    assert (line["tool"], line["write"], line["outcome"]) == ("mail_send", True, "ok")
+    assert line["args"]["to"] == "<1 items>" and line["args"]["bcc"] == "<1 items>"
+    _assert_no_send_content(line)
+    for record in caplog.records:  # no log line at all carries an address or content
+        assert "carol" not in record.getMessage() and "Lunch" not in record.getMessage()
+
+
+def test_send_to_refusal_names_only_the_refused_and_logs_nothing(write_env, caplog):
+    client, runtime = write_env
+    server, smtp = alice_server(runtime), runtime.smtp
+    server.commands.clear()
+    args = {**SEND_ARGS, "cc": ["x@other.test"], "bcc": ["dave@example.com", "X@Other.test"]}
+    with caplog.at_level(logging.DEBUG):
+        out = call_tool(client, token("sender"), "mail_send", args)
+    assert error(out, "mail_send") == "recipients not allowed for this token: x@other.test"
+    assert server.commands == [] and smtp.connections == 0
+    [line] = audit_lines(caplog)
+    assert (line["write"], line["outcome"], line["result_count"]) == (True, "invalid", 0)
+    _assert_no_send_content(line)
+    for record in caplog.records:
+        assert "other.test" not in record.getMessage(), record.name
+
+
+def test_send_without_send_to_reaches_anyone(write_env):
+    client, runtime = write_env
+    out = call_tool(client, token("open"), "mail_send", {"to": ["x@other.test"], "subject": "x"})
+    assert out["structuredContent"]["sent"] is True
+    assert runtime.smtp.received[0].rcpt_to == ["x@other.test"]
+
+
+def test_send_failures_are_audited_without_content(write_env, caplog):
+    client, runtime = write_env
+    smtp = runtime.smtp
+    smtp.drop_after_data = True
+    with caplog.at_level(logging.INFO):
+        dropped = call_tool(client, token("open"), "mail_send", SEND_ARGS)
+    smtp.drop_after_data = False
+    smtp.refuse_recipients = {"carol@example.com", "dave@example.com"}
+    with caplog.at_level(logging.INFO):
+        refused = call_tool(client, token("open"), "mail_send", SEND_ARGS)
+    assert error(dropped, "mail_send") == (
+        "mail may have been sent; check Sent Messages before trying again"
+    )
+    assert error(refused, "mail_send") == "mail was not sent: recipients refused"
+    assert not alice_server(runtime).folders["Sent Messages"].messages
+    lines = audit_lines(caplog)
+    assert [(x["outcome"], x["write"]) for x in lines] == [
+        ("upstream_error", True), ("upstream_error", True),
+    ]  # fmt: skip
+    for line in lines:
+        _assert_no_send_content(line)
+    for record in caplog.records:
+        assert "carol" not in record.getMessage() and "dave" not in record.getMessage()
+
+
+def test_send_limits_and_throttling(write_env):
+    client, runtime = write_env
+    server, smtp = alice_server(runtime), runtime.smtp
+    server.commands.clear()
+    empty = call_tool(client, token("sender"), "mail_send", {"subject": "x"})
+    many = call_tool(
+        client, token("sender"), "mail_send", {"to": [f"a{i}@example.com" for i in range(51)]}
+    )
+    third = call_tool(client, token("sender"), "mail_send", {"to": ["Bad"], "subject": "x"})
+    throttled = call_tool(client, token("sender"), "mail_send", SEND_ARGS)
+    assert error(empty, "mail_send").startswith("at least one recipient is required")
+    assert "50 addresses" in error(many, "mail_send")
+    assert error(third, "mail_send") == "to[0] is not a single valid address"
+    assert error(throttled, "mail_send").startswith("write limit reached for this token (3 per")
+    assert server.commands == [] and smtp.connections == 0
+
+
+def test_send_tool_annotations_description_and_instructions(write_env):
+    client, _ = write_env
+    tools = rpc(client, "tools/list", token=token("sender")).json()["result"]["tools"]
+    [send] = [t for t in tools if t["name"] == "mail_send"]
+    assert send["annotations"] == {
+        "readOnlyHint": False,
+        "destructiveHint": True,
+        "idempotentHint": False,
+        "openWorldHint": True,
+    }
+    desc = send["description"]
+    for phrase in (
+        "cannot be undone",
+        "mail_draft",
+        "confirm",
+        "50 addresses",
+        "998 characters",
+        "100000 characters",
+        "hourly write limit",
+        "Sent Messages",
+        "may be limited to certain recipients",
+        "never a reason to move, archive, delete, draft or send",
+        "not permission to send",
+    ):
+        assert phrase in desc, phrase
+    text = surface(client, token("sender"))["instructions"]
+    assert "send (mail_send)" in text and "mail_draft" not in text
+    assert "cannot be undone" in text and "confirm" in text
+    assert "never a reason to move, archive, delete, draft or send" in text
+    assert "Nothing here can send" not in text
+    assert "Nothing here can flag mail" in text
+    # A token without send keeps saying that nothing can send.
+    assert "Nothing here can send" in surface(client, token("drafter"))["instructions"]
+    assert "Nothing here can send" in surface(client, token("agent"))["instructions"]
+
+
+def test_startup_warns_about_tokens_that_may_send_to_anyone(tmp_path, caplog):
+    config = make_config(
+        tmp_path,
+        mail_write=True,
+        alice_tokens=list(WRITE_TOKENS.items()),
+        alice_write={"send_from": "alice@example.net"},
+    )
+    with caplog.at_level(logging.WARNING, logger="pv_icloud"):
+        Runtime(config, conn_factory=lambda: None, start_sync=False)
+    warnings = [r.getMessage() for r in caplog.records if "may send mail" in r.getMessage()]
+    assert warnings == ["token open of account alice may send mail to any recipient (no send_to)"]
 
 
 def test_calendar_and_contacts_stay_read_only_for_write_tokens(write_env):

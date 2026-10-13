@@ -6,21 +6,35 @@
 from __future__ import annotations
 
 import datetime as dt
+import logging
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from typing import TYPE_CHECKING, Any
 
 from ..config import AccountConfig
-from ..errors import ToolInputError
-from .compose import Original, build_draft, check_draft
+from ..errors import ToolInputError, WriteFailed
+from .compose import (
+    Original,
+    Outgoing,
+    addr_specs,
+    build_draft,
+    build_outgoing,
+    check_draft,
+    check_send,
+    not_allowed,
+)
 from .ids import BadMailId, MailId, decode_id
-from .imap import ImapPool
+from .imap import ImapError, ImapErrors, ImapPool
 from .index import IndexedMessage, MailIndex
 from .parse import ParsedMessage, parse_message
 from .sync import MailSync
 
 if TYPE_CHECKING:  # imported at run time only when mail writes are switched on
     from .imap_write import MailWriter
+    from .smtp import SmtpSender
 
+log = logging.getLogger(__name__)
+
+NOT_ALLOWED = "recipients not allowed for this token"
 MAX_FETCH_BYTES = 5 * 1024 * 1024
 SEARCH_LIMIT_DEFAULT = 20
 SEARCH_LIMIT_MAX = 50
@@ -66,12 +80,14 @@ class MailService:
         pool: ImapPool,
         sync: MailSync | None,
         writer: MailWriter | None = None,  # only when PV_ICLOUD_MAIL_WRITE=enabled
+        sender: SmtpSender | None = None,  # likewise
     ):
         self.account = account
         self.index = index
         self.pool = pool
         self.sync = sync
         self.writer = writer
+        self.sender = sender
 
     # --- scope -------------------------------------------------------------------------
 
@@ -353,6 +369,88 @@ class MailService:
             "id": saved.new_id.encode() if saved.new_id else None,
             "in_reply_to": in_reply_to or None,
         }
+
+    def send(
+        self,
+        *,
+        to: Sequence[str] = (),
+        cc: Sequence[str] = (),
+        bcc: Sequence[str] = (),
+        subject: str | None = None,
+        body: str = "",
+        in_reply_to: str | None = None,
+        send_to: Sequence[str] | None = None,
+    ) -> dict:
+        """Send one plain-text message over SMTP from mail.write.send_from, then make sure
+        Sent Messages holds exactly one copy. `send_to` is the calling token's allowlist.
+
+        Every refusal (limits, send_to, a bad reply id, no Sent Messages) happens before the
+        SMTP connection. Protected folders do not apply: the `send` grant is the control.
+        """
+        if self.writer is None or self.sender is None:
+            raise ToolInputError("mail writes are not enabled")
+        send_from = self.account.mail.write.send_from
+        if send_from is None:  # config.py refuses a send grant without it
+            raise ToolInputError("mail.write.send_from is not set for this account")
+        check_send(to=to, cc=cc, bcc=bcc, subject=subject, body=body)
+        envelope = addr_specs([*to, *cc, *bcc])
+        if send_to is not None:
+            refused = not_allowed(envelope, send_to)
+            if refused:  # the caller's own input; never logged (the audit line has counts)
+                raise ToolInputError(f"{NOT_ALLOWED}: {', '.join(refused)}")
+        reply = None
+        if in_reply_to:
+            p, _ = self._fetch_one(self._resolve(in_reply_to))
+            reply = Original(p.message_id, p.in_reply_to, p.references, p.subject)
+        from .imap_write import find_sent
+
+        with self.pool.connection() as client:
+            sent_folder = find_sent(client.folder_attributes())  # even if hidden from reads
+        if sent_folder is None:
+            raise ToolInputError("Sent Messages folder not found; nothing was sent")
+        out = build_outgoing(
+            to=to, cc=cc, bcc=bcc, subject=subject, body=body, send_from=send_from, reply=reply
+        )
+        result = self.sender.send(send_from, envelope, out.sent)
+        # The mail has gone: from here on nothing fails the call.
+        saved, copy_id = self._sent_copy(sent_folder, out)
+        if self.sync is not None and self.account.mail.folders.allows(sent_folder):
+            self.sync.request_resync(sent_folder)
+        return {
+            "sent": True,
+            "message_id": out.message_id,
+            "recipients": len(envelope),
+            "refused_recipients": list(result.refused),
+            "sent_copy_saved": saved,
+            "sent_copy_id": copy_id.encode() if copy_id else None,
+            "in_reply_to": in_reply_to or None,
+        }
+
+    def _sent_copy(self, folder: str, out: Outgoing) -> tuple[bool, MailId | None]:
+        """Exactly one copy in Sent Messages: the one iCloud filed, if the read path finds it
+        by Message-ID, otherwise one appended now. Returns whether a copy is there, and its
+        id when known. Logs name only the account and the error class."""
+        assert self.writer is not None
+        if out.message_id.isascii():  # UID SEARCH criteria must be ASCII
+            try:
+                with self.pool.connection() as client:
+                    st = client.examine(folder)
+                    uids = client.uid_search("HEADER", "Message-ID", f'"{out.message_id}"')
+                if uids:
+                    return True, MailId(folder, st.uidvalidity, max(uids))
+            except (ImapError, *ImapErrors) as exc:  # the check failed: append anyway
+                log.warning(
+                    "%s: looking for the sent copy failed (%s)", self.account.id, type(exc).__name__
+                )
+        try:
+            return True, self.writer.append_sent(out.copy).new_id
+        except (WriteFailed, ImapError, *ImapErrors) as exc:
+            log.warning(
+                "%s: the mail was sent, but saving its copy failed (%s)",
+                self.account.id,
+                type(exc).__name__,
+            )
+            return False, None
 
     def _write_source(
         self, mail_id: str, token_protected: Sequence[str]

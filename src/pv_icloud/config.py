@@ -30,12 +30,15 @@ SPECIAL_FOLDERS = {"junk": "Junk", "deleted_messages": "Deleted Messages", "draf
 
 # Mail writes (docs/adr/0004-opt-in-mail-write.md): off unless this variable is `enabled`.
 MAIL_WRITE_ENV = "PV_ICLOUD_MAIL_WRITE"
-MAIL_WRITE_ACTIONS = ("move", "archive", "delete", "draft")
+MAIL_WRITE_ACTIONS = ("move", "archive", "delete", "draft", "send")
 MAX_WRITES_PER_HOUR = 30
 _MAIL_WRITE_KEYS = ("protected_folders", "archive_folder", "send_from")
 # One bare address, local@domain: no display name, spaces, commas or angle brackets, and a
 # domain with a dot.
-BARE_ADDRESS_RE = re.compile(r"^[^@\s,;<>()\"]+@[^@\s,;<>()\".]+(\.[^@\s,;<>()\".]+)+$")
+_DOMAIN = r"[^@\s,;<>()\".]+(\.[^@\s,;<>()\".]+)+"
+BARE_ADDRESS_RE = re.compile(rf"^[^@\s,;<>()\"]+@{_DOMAIN}$")
+# A send_to entry is a bare address or `@` followed by a domain.
+SEND_TO_DOMAIN_RE = re.compile(rf"^@{_DOMAIN}$")
 
 
 class ConfigError(Exception):
@@ -67,7 +70,8 @@ class MailWriteConfig:
     # Defaults and account lists together: an account adds to the defaults, never replaces.
     protected_folders: tuple[str, ...] = ()
     archive_folder: str = "Archive"
-    send_from: str | None = None  # From of drafts; unset: no From (Mail fills it in)
+    # From of drafts (unset: no From, Mail fills it in) and of sent mail (required for send).
+    send_from: str | None = None
 
 
 @dataclass(frozen=True)
@@ -105,6 +109,8 @@ class TokenEntry:
     mail_write: frozenset[str] = frozenset()  # granted actions from MAIL_WRITE_ACTIONS
     protected_folders: tuple[str, ...] = ()  # added to the account's protected folders
     max_writes_per_hour: int = MAX_WRITES_PER_HOUR
+    # Recipients mail_send may reach: lower-cased addresses and `@domain` entries; None: any.
+    send_to: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -224,7 +230,29 @@ def _token(t: Mapping[str, Any], label: str, digest: str, where: str) -> TokenEn
         max_writes_per_hour=_positive_int(
             t.get("max_writes_per_hour", MAX_WRITES_PER_HOUR), f"{where} max_writes_per_hour"
         ),
+        send_to=_send_to(t, "send" in actions, where),
     )
+
+
+def _send_to(t: Mapping[str, Any], send: bool, where: str) -> tuple[str, ...] | None:
+    if "send_to" not in t:
+        return None
+    if not send:
+        raise ConfigError(f"{where} send_to needs the send action in mail_write")
+    value = t["send_to"]
+    if (
+        not isinstance(value, list)
+        or not value
+        or not all(
+            isinstance(x, str) and (BARE_ADDRESS_RE.match(x) or SEND_TO_DOMAIN_RE.match(x))
+            for x in value
+        )
+    ):
+        raise ConfigError(
+            f"{where} send_to must be a non-empty list of bare addresses (local@domain) "
+            "or @domain entries"
+        )
+    return tuple(dict.fromkeys(x.lower() for x in value))
 
 
 def _write_section(raw: Any, where: str) -> Mapping[str, Any]:
@@ -318,6 +346,12 @@ def parse_config(raw: Mapping[str, Any], env: Mapping[str, str], data_dir: Path)
         if mail.max_connections < 2:
             # One connection is reserved for the sync worker (ADR-0003).
             raise ConfigError(f"{where}.mail.max_connections must be at least 2")
+        for token in tokens:
+            if "send" in token.mail_write and mail.write.send_from is None:
+                raise ConfigError(
+                    f"{where}: token {token.label!r} has send in mail_write but "
+                    "mail.write.send_from is not set"
+                )
         calendar = CalendarConfig(
             calendars=_scope(
                 cal_raw.get("calendars"), hidden=frozenset(), where=f"{where}.calendar.calendars"
@@ -362,6 +396,17 @@ def parse_config(raw: Mapping[str, Any], env: Mapping[str, str], data_dir: Path)
             )
         )
     return Config(accounts=tuple(accounts), data_dir=data_dir, mail_write=mail_write)
+
+
+def send_warnings(config: Config) -> list[str]:
+    """One startup warning per token that may send mail to anyone (send without send_to).
+    Names only the token label and account id, never an address."""
+    return [
+        f"token {t.label} of account {acct.id} may send mail to any recipient (no send_to)"
+        for acct in config.accounts
+        for t in acct.tokens
+        if "send" in t.mail_write and t.send_to is None
+    ]
 
 
 def load_config(

@@ -9,7 +9,7 @@ import pytest
 
 from pv_icloud import utf7
 from pv_icloud.auth import TokenTable
-from pv_icloud.config import ConfigError, parse_config
+from pv_icloud.config import ConfigError, parse_config, send_warnings
 from pv_icloud.mail.ids import BadMailId, MailId, decode_id
 from pv_icloud.mail.imap import _parse_fetch, uid_set
 from pv_icloud.mail.index import fts_query
@@ -285,9 +285,7 @@ class TestMailWriteConfig:
     @pytest.mark.parametrize(
         ("token", "parts"),
         [
-            ({"mail_write": ["move", "expunge"]}, ["mail_write", "expunge", "move, archive"]),
-            # send arrives with add-mail-send; until then it is unknown, listing the allowed.
-            ({"mail_write": ["draft", "send"]}, ["mail_write", "send", "delete, draft"]),
+            ({"mail_write": ["move", "expunge"]}, ["mail_write", "expunge", "draft, send"]),
             ({"mail_write": "move"}, ["mail_write", "list"]),
             ({"mail_write": [1]}, ["mail_write"]),
             ({"protected_folders": "Work"}, ["protected_folders", "list"]),
@@ -343,7 +341,7 @@ class TestMailWriteConfig:
     @pytest.mark.parametrize(
         ("write", "parts"),
         [
-            ({"send_to": ["a@example.com"]}, ["unknown key", "send_to"]),  # add-mail-send
+            ({"send_to": ["a@example.com"]}, ["unknown key", "send_to"]),  # a token key
             ({"send_from": "not-an-address"}, ["mail.write.send_from", "bare address"]),
             ({"send_from": "Me <me@example.com>"}, ["mail.write.send_from"]),
             ({"send_from": "a@example.com, b@example.com"}, ["mail.write.send_from"]),
@@ -390,6 +388,116 @@ class TestMailWriteConfig:
         assert phone.max_writes_per_hour == 30
         assert laptop.token_key != phone.token_key
         assert sha("laptop") not in repr(laptop)  # the hash never reaches a log line
+        assert laptop.send_to is None and phone.send_to is None
+
+
+SENDER = {"write": {"send_from": "me@example.com"}}
+
+
+class TestSendConfig:
+    """`send`, `send_to` and `mail.write.send_from` (add-mail-send)."""
+
+    def test_send_grant(self, tmp_path):
+        cfg = write_config(tmp_path, token={"mail_write": ["send"]}, mail=SENDER)
+        [tok] = cfg.account("x").tokens
+        assert tok.mail_write == frozenset({"send"})  # and never draft
+        assert tok.send_to is None
+        assert cfg.account("x").mail.write.send_from == "me@example.com"
+
+    def test_send_and_draft_are_separate(self, tmp_path):
+        token = {"mail_write": ["draft"]}
+        [tok] = write_config(tmp_path, token=token, mail=SENDER).account("x").tokens
+        assert "send" not in tok.mail_write
+
+    def test_send_without_send_from(self, tmp_path):
+        with pytest.raises(ConfigError) as err:
+            write_config(tmp_path, token={"mail_write": ["send"]})
+        for part in ("account x", "'agent'", "send", "mail.write.send_from"):
+            assert part in str(err.value)
+
+    def test_send_from_from_the_defaults_is_enough(self, tmp_path):
+        cfg = write_config(tmp_path, token={"mail_write": ["send"]}, defaults=SENDER)
+        assert cfg.account("x").mail.write.send_from == "me@example.com"
+
+    def test_send_without_the_switch(self, tmp_path):
+        with pytest.raises(ConfigError, match="PV_ICLOUD_MAIL_WRITE"):
+            write_config(tmp_path, env={}, token={"mail_write": ["send"]}, mail=SENDER)
+
+    def test_send_to_entries_are_lower_cased(self, tmp_path):
+        token = {
+            "mail_write": ["send"],
+            "send_to": ["Bob@Example.COM", "@Example.org", "bob@example.com"],
+        }
+        [tok] = write_config(tmp_path, token=token, mail=SENDER).account("x").tokens
+        assert tok.send_to == ("bob@example.com", "@example.org")
+
+    @pytest.mark.parametrize(
+        "send_to",
+        [
+            [],
+            "a@example.com",
+            [1],
+            [""],
+            ["Bob <bob@example.com>"],
+            ["bob@example.com, carol@example.com"],
+            ["example.org"],
+            ["@example"],
+            ["@"],
+            ["@@example.org"],
+            ["a@b@example.org"],
+            ["bob @example.com"],
+            ["bob@localhost"],
+        ],
+    )
+    def test_malformed_send_to(self, tmp_path, send_to):
+        token = {"mail_write": ["send"], "send_to": send_to}
+        with pytest.raises(ConfigError) as err:
+            write_config(tmp_path, token=token, mail=SENDER)
+        for part in ("account x", "'agent'", "send_to"):
+            assert part in str(err.value)
+
+    @pytest.mark.parametrize("actions", [[], ["draft"], ["move", "archive"]])
+    def test_send_to_needs_send(self, tmp_path, actions):
+        token = {"mail_write": actions, "send_to": ["a@example.com"]}
+        with pytest.raises(ConfigError) as err:
+            write_config(tmp_path, token=token, mail=SENDER)
+        for part in ("account x", "'agent'", "send_to", "send"):
+            assert part in str(err.value)
+
+    def test_send_to_reaches_the_token_context(self, tmp_path):
+        tokens = [
+            {
+                "label": "mailer",
+                "sha256": sha("mailer"),
+                "mail_write": ["send"],
+                "send_to": ["@example.org"],
+            },
+            {"label": "open", "sha256": sha("open"), "mail_write": ["send"]},
+        ]
+        table = TokenTable(write_config(tmp_path, tokens=tokens, mail=SENDER))
+        mailer, other = table.resolve("mailer"), table.resolve("open")
+        assert mailer is not None and other is not None
+        assert mailer.send_to == ("@example.org",)
+        assert other.send_to is None
+
+    def test_warning_for_send_without_send_to(self, tmp_path):
+        tokens = [
+            {"label": "mailer", "sha256": sha("mailer"), "mail_write": ["send"]},
+            {
+                "label": "fenced",
+                "sha256": sha("fenced"),
+                "mail_write": ["send"],
+                "send_to": ["a@example.com"],
+            },
+            {"label": "drafter", "sha256": sha("drafter"), "mail_write": ["draft"]},
+        ]
+        cfg = write_config(tmp_path, tokens=tokens, mail=SENDER)
+        warnings = send_warnings(cfg)
+        assert warnings == ["token mailer of account x may send mail to any recipient (no send_to)"]
+        assert not any("@" in w for w in warnings)
+
+    def test_no_warning_without_send(self, tmp_path):
+        assert send_warnings(write_config(tmp_path, token={"mail_write": ["draft"]})) == []
 
 
 class TestWriteLimiter:

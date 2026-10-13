@@ -18,8 +18,13 @@ from pv_icloud.mail.compose import (
     MAX_BODY_CHARS,
     MAX_SUBJECT_CHARS,
     Original,
+    Outgoing,
+    addr_specs,
     build_draft,
+    build_outgoing,
     check_draft,
+    check_send,
+    not_allowed,
     reply_subject,
 )
 from pv_icloud.mail.parse import parse_message
@@ -241,3 +246,88 @@ class TestReplies:
     )
     def test_re_subject(self, original, expected):
         assert reply_subject(original) == expected
+
+
+# --- mail_send (add-mail-send) -------------------------------------------------------------
+
+
+def check_s(**kw) -> None:
+    args: dict = {"to": [], "cc": [], "bcc": [], "subject": None, "body": ""}
+    check_send(**{**args, **kw})
+
+
+def outgoing(**kw) -> Outgoing:
+    args: dict = {
+        "to": ["a@example.com"],
+        "cc": [],
+        "bcc": [],
+        "subject": "Hi",
+        "body": "Hello",
+        "send_from": "me@example.net",
+        "now": NOW,
+    }
+    return build_outgoing(**{**args, **kw})
+
+
+class TestSendInput:
+    def test_needs_a_recipient(self):
+        for kw in ({}, {"subject": "x", "body": "y"}):
+            with pytest.raises(ToolInputError, match="^at least one recipient is required"):
+                check_s(**kw)
+        check_s(bcc=["a@example.com"])
+
+    @pytest.mark.parametrize(
+        ("kw", "message"),
+        [
+            ({"to": [f"a{i}@example.com" for i in range(51)]}, "at most 50 addresses"),
+            ({"to": ["a@example.com"], "cc": ["nope"]}, r"cc\[0\]"),
+            ({"to": ["a@example.com"], "subject": "x" * 999}, "subject"),
+            ({"to": ["a@example.com"], "subject": "a\nBcc: b@x.org"}, "subject"),
+            ({"to": ["a@example.com"], "body": "b" * 100_001}, "100000"),
+        ],
+    )
+    def test_shares_the_draft_limits(self, kw, message):
+        with pytest.raises(ToolInputError, match=message):
+            check_s(**kw)
+
+    def test_addr_specs(self):
+        got = addr_specs(["Bob <Bob@Example.COM>", "bob@example.com", "c@example.org"])
+        assert got == ["bob@example.com", "c@example.org"]
+
+    def test_not_allowed(self):
+        allow = ("a@example.com", "@example.org")
+        addresses = ["a@example.com", "b@example.org", "c@mail.example.org", "d@example.com"]
+        assert not_allowed(addresses, allow) == ["c@mail.example.org", "d@example.com"]
+        assert not_allowed(["x@example.org.evil.test"], allow) == ["x@example.org.evil.test"]
+        assert not_allowed([], allow) == []
+
+
+class TestOutgoing:
+    def test_sent_bytes_have_no_bcc_and_the_copy_has_it(self):
+        out = outgoing(cc=["c@example.com"], bcc=["Hidden <hidden@example.org>"])
+        sent = email.message_from_bytes(out.sent, policy=policy.default)
+        copy = email.message_from_bytes(out.copy, policy=policy.default)
+        assert sent["Bcc"] is None and b"hidden" not in out.sent.lower()
+        assert copy["Bcc"] == "Hidden <hidden@example.org>"
+        for name in ("From", "To", "Cc", "Subject", "Date", "Message-ID"):
+            assert sent[name] == copy[name], name
+        assert sent["From"] == "me@example.net"
+        assert out.message_id == sent["Message-ID"]
+
+    def test_message_id_uses_the_senders_domain_never_the_host_name(self):
+        out = outgoing()
+        assert out.message_id.startswith("<") and out.message_id.endswith("@example.net>")
+        assert socket.gethostname() not in out.message_id
+
+    def test_body_is_seven_bit_clean(self):
+        out = outgoing(subject="Grüße", body="Grüße aus Köln\n" * 3)
+        assert out.sent.isascii() and out.copy.isascii()
+        p = parse_message(out.sent)
+        assert (p.subject, p.body.strip().splitlines()[0]) == ("Grüße", "Grüße aus Köln")
+
+    def test_reply_threading(self):
+        reply = Original("<m2@x>", "<m1@x>", ["<m1@x>"], "Plans")
+        p = parse_message(outgoing(subject=None, reply=reply).sent)
+        assert (p.in_reply_to, p.references, p.subject) == (
+            "<m2@x>", ["<m1@x>", "<m2@x>"], "Re: Plans"
+        )  # fmt: skip

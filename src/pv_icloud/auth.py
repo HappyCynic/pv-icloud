@@ -29,6 +29,7 @@ class AccountContext:
     mail_write: frozenset[str] = frozenset()
     protected_folders: tuple[str, ...] = ()
     max_writes_per_hour: int = MAX_WRITES_PER_HOUR
+    send_to: tuple[str, ...] | None = None  # mail_send's recipient allowlist; None: any
     # Keys the per-token write limit; the configured hash, so never shown in repr or logs.
     token_key: str = field(default="", repr=False)
 
@@ -57,6 +58,7 @@ class TokenTable:
                     mail_write=t.mail_write,
                     protected_folders=t.protected_folders,
                     max_writes_per_hour=t.max_writes_per_hour,
+                    send_to=t.send_to,
                     token_key=t.sha256,
                 ),
             )

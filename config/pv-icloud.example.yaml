@@ -29,7 +29,9 @@ defaults:
       # governed by the `draft` grant, not by this list.
       protected_folders: []
       archive_folder: Archive  # where mail_archive moves messages (found by name)
-      # send_from: someone@example.com  # From of drafts; unset: Mail fills in the sender
+      # From of drafts and sent mail: the account's iCloud address or one of its aliases.
+      # Unset: drafts have no From (Mail fills it in). Required if a token has `send`.
+      # send_from: someone@example.com
   calendar:
     # Calendar display names, globs allowed; applies to subscribed calendars too.
     calendars: { include: "*", exclude: [] }
@@ -55,6 +57,12 @@ accounts:
       #                       # for a person to review and send (never sent by pv-icloud)
       #   protected_folders: [Work]             # added to the account's protected folders
       #   max_writes_per_hour: 30               # default 30; held in memory
+      # `send` (mail_send) sends mail as this account and CANNOT be undone. Prefer `draft`.
+      # If a client must send, grant it on its own, limit the recipients with `send_to`
+      # (exact addresses or @domain entries), and set mail.write.send_from above. Without
+      # send_to the token may send to anyone and the server warns at startup.
+      #   mail_write: [send]
+      #   send_to: [someone@example.com, "@example.org"]
       - { label: laptop, sha256: "REPLACE_ME" }
     mail:
       folders: { exclude: [] }

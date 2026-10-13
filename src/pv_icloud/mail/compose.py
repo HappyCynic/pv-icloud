@@ -1,10 +1,12 @@
 # SPDX-FileCopyrightText: 2026 Happy Cynic Software LLC
 # SPDX-License-Identifier: Apache-2.0
 
-"""Building a plain-text draft for mail_draft (add-mail-draft). No IMAP or network code.
+"""Building plain-text messages for mail_draft and mail_send. No IMAP or network code.
 
-check_draft() enforces the input limits stated in the tool description; build_draft() turns
-checked input into the RFC 5322 bytes that mail/imap_write.py saves in Drafts.
+check_draft() and check_send() enforce the input limits stated in the tool descriptions;
+build_draft() turns checked input into the RFC 5322 bytes that mail/imap_write.py saves in
+Drafts, and build_outgoing() into the bytes mail/smtp.py sends (without Bcc) plus the copy
+for Sent Messages (with Bcc).
 """
 
 from __future__ import annotations
@@ -25,6 +27,7 @@ MAX_BODY_CHARS = 100_000
 # Never make_msgid()'s default, which is this machine's host name.
 MESSAGE_ID_DOMAIN = "pv-icloud.invalid"
 NOTHING_TO_DRAFT = "nothing to draft"
+NO_RECIPIENTS = "at least one recipient is required (to, cc or bcc)"
 
 
 @dataclass(frozen=True)
@@ -74,6 +77,34 @@ def check_draft(
     in_reply_to: str | None,
 ) -> None:
     """Raise ToolInputError naming the first limit the input breaks."""
+    check_limits(to=to, cc=cc, bcc=bcc, subject=subject, body=body)
+    if not (to or cc or bcc or subject or body or in_reply_to):
+        raise ToolInputError(NOTHING_TO_DRAFT)
+
+
+def check_send(
+    *,
+    to: Sequence[object],
+    cc: Sequence[object],
+    bcc: Sequence[object],
+    subject: str | None,
+    body: str,
+) -> None:
+    """mail_send's input: the draft limits, and at least one recipient."""
+    check_limits(to=to, cc=cc, bcc=bcc, subject=subject, body=body)
+    if not (to or cc or bcc):
+        raise ToolInputError(NO_RECIPIENTS)
+
+
+def check_limits(
+    *,
+    to: Sequence[object],
+    cc: Sequence[object],
+    bcc: Sequence[object],
+    subject: str | None,
+    body: str,
+) -> None:
+    """The address, subject and body limits shared by mail_draft and mail_send."""
     if len(to) + len(cc) + len(bcc) > MAX_ADDRESSES:
         raise ToolInputError(f"at most {MAX_ADDRESSES} addresses across to, cc and bcc")
     for name, values in (("to", to), ("cc", cc), ("bcc", bcc)):
@@ -86,8 +117,19 @@ def check_draft(
         )
     if len(body) > MAX_BODY_CHARS:
         raise ToolInputError(f"body must be at most {MAX_BODY_CHARS} characters")
-    if not (to or cc or bcc or subject or body or in_reply_to):
-        raise ToolInputError(NOTHING_TO_DRAFT)
+
+
+def addr_specs(values: Sequence[str]) -> list[str]:
+    """The bare, lower-cased `local@domain` of each checked address, each once, in order."""
+    out = [a.addr_spec.lower() for a in _addresses("address", values)]
+    return list(dict.fromkeys(out))
+
+
+def not_allowed(addresses: Sequence[str], send_to: Sequence[str]) -> list[str]:
+    """The addresses (from addr_specs) that match no send_to entry. An entry is a whole
+    address, or `@domain`, which matches exactly that domain and none of its subdomains."""
+    allowed = set(send_to)
+    return [a for a in addresses if a not in allowed and "@" + a.rpartition("@")[2] not in allowed]
 
 
 def reply_subject(original: str | None) -> str:
@@ -110,10 +152,77 @@ def build_draft(
     now: dt.datetime | None = None,
 ) -> bytes:
     """The draft as bytes with CRLF line endings. Input must have passed check_draft()."""
-    msg = EmailMessage(policy=policy.SMTP)
+    msg = _build(
+        to=to,
+        cc=cc,
+        subject=subject,
+        body=body,
+        send_from=send_from,
+        reply=reply,
+        now=now,
+        msgid_domain=MESSAGE_ID_DOMAIN,
+        mail_policy=policy.SMTP,
+    )
+    if bcc:
+        msg["Bcc"] = _addresses("bcc", bcc)
+    return msg.as_bytes()
+
+
+@dataclass(frozen=True)
+class Outgoing:
+    """A message for mail_send: what goes over SMTP, and the copy for Sent Messages."""
+
+    message_id: str
+    sent: bytes  # no Bcc header: Bcc recipients are only in the SMTP envelope
+    copy: bytes  # the same message with a Bcc header, as mail clients keep it
+
+
+def build_outgoing(
+    *,
+    to: Sequence[str],
+    cc: Sequence[str],
+    bcc: Sequence[str],
+    subject: str | None,
+    body: str,
+    send_from: str,
+    reply: Original | None = None,
+    now: dt.datetime | None = None,
+) -> Outgoing:
+    """Input must have passed check_send(). The body is 7-bit clean (quoted-printable or
+    base64 when needed), so it is valid over SMTP without 8BITMIME."""
+    msg = _build(
+        to=to,
+        cc=cc,
+        subject=subject,
+        body=body,
+        send_from=send_from,
+        reply=reply,
+        now=now,
+        msgid_domain=send_from.rpartition("@")[2],
+        mail_policy=policy.SMTP.clone(cte_type="7bit"),
+    )
+    sent = msg.as_bytes()
+    if bcc:
+        msg["Bcc"] = _addresses("bcc", bcc)
+    return Outgoing(str(msg["Message-ID"]), sent, msg.as_bytes())
+
+
+def _build(
+    *,
+    to: Sequence[str],
+    cc: Sequence[str],
+    subject: str | None,
+    body: str,
+    send_from: str | None,
+    reply: Original | None,
+    now: dt.datetime | None,
+    msgid_domain: str,
+    mail_policy: policy.EmailPolicy[EmailMessage],
+) -> EmailMessage:
+    msg = EmailMessage(policy=mail_policy)
     if send_from:
         msg["From"] = send_from
-    for name, values in (("To", to), ("Cc", cc), ("Bcc", bcc)):
+    for name, values in (("To", to), ("Cc", cc)):
         if values:
             msg[name] = _addresses(name.lower(), values)
     if not subject and reply is not None:
@@ -121,10 +230,10 @@ def build_draft(
     if subject:
         msg["Subject"] = subject
     msg["Date"] = email.utils.format_datetime(now or dt.datetime.now(dt.UTC))
-    msg["Message-ID"] = email.utils.make_msgid(domain=MESSAGE_ID_DOMAIN)
+    msg["Message-ID"] = email.utils.make_msgid(domain=msgid_domain)
     if reply is not None and reply.message_id:
         parents = reply.references or ([reply.in_reply_to] if reply.in_reply_to else [])
         msg["In-Reply-To"] = reply.message_id
         msg["References"] = " ".join([*parents, reply.message_id])
     msg.set_content(body)
-    return msg.as_bytes()
+    return msg

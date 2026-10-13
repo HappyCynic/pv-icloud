@@ -12,9 +12,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 OWNER = "@mwklein"
-# Owned before they exist: the only modules allowed to change mail (ADR-0004), created by the
-# add-mail-write-core change. Remove a path from here once it exists.
-PLANNED_PATHS = {"/src/pv_icloud/mail/smtp.py"}
+# Owned before they exist (e.g. the modules allowed to change mail, ADR-0004, before their
+# change lands). Remove a path from here once it exists.
+PLANNED_PATHS: set[str] = set()
 
 
 def _codeowners() -> dict[str, list[str]]:
@@ -105,8 +105,9 @@ _FORBIDDEN_METHODS = frozenset(
 _FORBIDDEN_ON_CONN = frozenset({"copy", "create", "delete", "close"})
 _UID_READ = frozenset({"SEARCH", "FETCH"})
 _UID_WRITE = frozenset({"COPY", "STORE", "EXPUNGE"})
-# The only flags a new message may be created with: a draft (add-mail-draft).
-_APPEND_FLAGS = "(\\Draft \\Seen)"
+# The only flags a new message may be created with: a draft (add-mail-draft) and the copy of
+# a sent message (add-mail-send).
+_APPEND_FLAGS = frozenset({"(\\Draft \\Seen)", "(\\Seen)"})
 
 
 def _calls(path: Path) -> list[ast.Call]:
@@ -165,12 +166,14 @@ def _imap_violations(path: Path) -> list[str]:
 
 
 def _append_violations(call: ast.Call, where: str, in_write: bool) -> list[str]:
-    """APPEND only creates a draft: in the write module, flags exactly `(\\Draft \\Seen)`."""
+    """APPEND only creates a draft or a sent copy: in the write module, with flags exactly
+    `(\\Draft \\Seen)` or `(\\Seen)` as a literal."""
     if not in_write:
         return [f"{where}: APPEND outside {WRITE_MODULE}"]
     flags = call.args[1] if len(call.args) > 1 else None
-    if len(call.args) != 4 or call.keywords or flags is None or _const(flags) != _APPEND_FLAGS:
-        return [f"{where}: APPEND may only save a draft with flags {_APPEND_FLAGS}"]
+    if len(call.args) != 4 or call.keywords or flags is None or _const(flags) not in _APPEND_FLAGS:
+        allowed = " or ".join(sorted(_APPEND_FLAGS))
+        return [f"{where}: APPEND may only save a draft or sent copy with flags {allowed}"]
     return []
 
 
@@ -213,7 +216,7 @@ def test_imap_write_module_exists_and_uses_every_write_form() -> None:
     assert {"COPY", "STORE", "EXPUNGE", "FETCH"} <= uid_commands
     assert any(_method(c) == "select" and not c.keywords for c in calls)
     appends = [c for c in calls if _method(c) == "append" and _receiver_is_conn(c)]
-    assert len(appends) == 1
+    assert sorted(_const(c.args[1]) or "" for c in appends) == sorted(_APPEND_FLAGS)
 
 
 @pytest.mark.parametrize(
@@ -251,7 +254,9 @@ def test_imap_policy_catches_read_path_violations(tmp_path: Path, source: str, m
         ("conn.uid('FETCH', str(uid), '(BODY[])')", "UID FETCH <uid> (UID FLAGS)"),
         ("conn.expunge()", ".expunge() is forbidden"),
         ("conn.append('Drafts', None, None, b'')", "only save a draft"),
-        ("conn.append('Drafts', '(\\\\Seen)', None, msg)", "only save a draft"),
+        ("conn.append('Drafts', '(\\\\Flagged)', None, msg)", "only save a draft"),
+        ("conn.append('Sent', '(\\\\Seen \\\\Flagged)', None, msg)", "only save a draft"),
+        ("conn.append('Sent', '(\\\\Seen)', '\"1-Jan-2026\"', msg, x)", "only save a draft"),
         ("conn.append('Drafts', '(\\\\Draft)', None, msg)", "only save a draft"),
         ("conn.append('Drafts', '(\\\\Draft \\\\Seen \\\\Flagged)', None, msg)", "only save"),
         ("conn.append('Drafts', flags, None, msg)", "only save a draft"),
@@ -266,13 +271,61 @@ def test_imap_policy_catches_write_path_violations(tmp_path: Path, source: str, 
     assert message in violation
 
 
-def test_imap_policy_allows_saving_a_draft(tmp_path: Path) -> None:
+def test_imap_policy_allows_saving_a_draft_and_a_sent_copy(tmp_path: Path) -> None:
     path = tmp_path / WRITE_MODULE
     path.write_text("conn.append(quote(DRAFTS), '(\\\\Draft \\\\Seen)', None, message)\n")
+    assert _imap_violations(path) == []
+    path.write_text("conn.append(quote(sent), '(\\\\Seen)', None, message)\n")
     assert _imap_violations(path) == []
     # An everyday list.append() is not an IMAP command.
     path.write_text("rows.append(row)\n")
     assert _imap_violations(path) == []
+
+
+SMTP_MODULE = ROOT / "src" / "pv_icloud" / "mail" / "smtp.py"
+
+
+def _imports_smtplib(path: Path) -> bool:
+    tree = ast.parse(path.read_text(), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import) and any(
+            a.name.split(".")[0] == "smtplib" for a in node.names
+        ):
+            return True
+        if isinstance(node, ast.ImportFrom) and (node.module or "").split(".")[0] == "smtplib":
+            return True
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name | ast.Attribute)
+            and getattr(node.func, "id", getattr(node.func, "attr", ""))
+            in ("import_module", "__import__")
+        ):
+            return True  # dynamic imports: not allowed anywhere in src, so none hides smtplib
+    return False
+
+
+def test_only_the_smtp_module_imports_smtplib() -> None:
+    sources = sorted((ROOT / "src").rglob("*.py"))
+    assert SMTP_MODULE in sources
+    assert [p.relative_to(ROOT).as_posix() for p in sources if _imports_smtplib(p)] == [
+        "src/pv_icloud/mail/smtp.py"
+    ]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "import smtplib",
+        "import smtplib as s",
+        "from smtplib import SMTP",
+        "importlib.import_module('x')",
+        "__import__('smtp' + 'lib')",
+    ],
+)
+def test_smtplib_policy_catches_imports(tmp_path: Path, source: str) -> None:
+    path = tmp_path / "x.py"
+    path.write_text(source + "\n")
+    assert _imports_smtplib(path)
 
 
 def test_dav_sends_only_propfind_and_report() -> None:

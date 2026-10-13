@@ -12,7 +12,8 @@ import pytest
 
 from pv_icloud.errors import ToolInputError, WriteFailed
 from pv_icloud.mail.ids import MailId, decode_id
-from pv_icloud.mail.imap_write import MailWriter, find_archive, find_trash
+from pv_icloud.mail.imap_write import MailWriter, find_archive, find_sent, find_trash
+from pv_icloud.mail.parse import parse_message
 
 from .conftest import Harness, make_config
 from .fakeimap import FakeConn, FakeServer, make_message
@@ -408,7 +409,332 @@ class TestAppendDraft:
         assert h.pool._free.qsize() == 1
 
 
+class TestFakeSentRules:
+    """The fake allows one more APPEND form: a sent copy, `(\\Seen)`, into Sent Messages."""
+
+    @pytest.fixture
+    def conn(self, server):
+        server.folder("Sent Messages")
+        c = server.connect()
+        c.login("alice@icloud.com", "app-pw")
+        return c
+
+    def test_append_sent_copy(self, conn, server):
+        typ, _ = conn.append('"Sent Messages"', "(\\Seen)", None, b"Subject: x\r\n\r\nx\r\n")
+        assert typ == "OK"
+        [msg] = server.folders["Sent Messages"].messages.values()
+        assert msg.flags == {"\\Seen"}
+        assert conn.response("APPENDUID") == ("APPENDUID", [f"1 {msg.uid}".encode()])
+
+    @pytest.mark.parametrize(
+        ("mailbox", "flags"),
+        [
+            ('"Sent Messages"', "(\\Draft \\Seen)"),
+            ('"Sent Messages"', "(\\Seen \\Flagged)"),
+            ('"Sent Messages"', None),
+            ('"Drafts"', "(\\Seen)"),
+            ('"INBOX"', "(\\Seen)"),
+            ('"INBOX"', "(\\Draft \\Seen)"),
+        ],
+    )
+    def test_other_forms_are_refused(self, conn, server, mailbox, flags):
+        with pytest.raises(AssertionError, match="forbidden"):
+            conn.append(mailbox, flags, None, b"Subject: x\r\n\r\nx\r\n")
+        assert not server.folders["Sent Messages"].messages
+        assert not server.folders["INBOX"].messages
+
+    def test_header_search(self, conn, server):
+        uid = deliver(server, "Sent Messages", message_id="<abc.1@example.net>")
+        deliver(server, "Sent Messages", message_id="<other@example.net>")
+        conn.select('"Sent Messages"', readonly=True)
+        typ, data = conn.uid("SEARCH", "HEADER", "Message-ID", '"<abc.1@example.net>"')
+        assert (typ, data) == ("OK", [str(uid).encode()])
+        server.fail_header_search = True
+        assert conn.uid("SEARCH", "HEADER", "Message-ID", '"<x@y>"')[0] == "NO"
+
+
+COPY = b"Subject: Lunch\r\nTo: bob@example.com\r\nBcc: carol@example.com\r\n\r\nNoon?\r\n"
+
+
+class TestAppendSent:
+    @pytest.fixture(autouse=True)
+    def sent_folder(self, server):
+        server.folder("Sent Messages")
+
+    def test_exact_command_sequence(self, server, writer):
+        server.commands.clear()
+        saved = writer.append_sent(COPY)
+        opened = {"CAPABILITY", "LOGIN", "ENABLE"}
+        assert [c[0] for c in server.commands if c[0] not in opened] == ["LIST", "APPEND", "LOGOUT"]
+        assert ("APPEND", '"Sent Messages"', "(\\Seen)") in server.commands
+        [msg] = server.folders["Sent Messages"].messages.values()
+        assert (msg.flags, msg.raw) == ({"\\Seen"}, COPY)
+        assert saved.new_id == MailId("Sent Messages", 1, msg.uid)
+
+    def test_other_mail_is_untouched(self, server, writer):
+        deliver(server, "INBOX")
+        before = server.all_flags()
+        writer.append_sent(COPY)
+        after = server.all_flags()
+        assert {k: v for k, v in after.items() if k[0] != "Sent Messages"} == before
+
+    def test_without_appenduid_the_copy_is_still_saved(self, server, writer):
+        server.appenduid = "omit"
+        assert writer.append_sent(COPY).new_id is None
+        assert len(server.folders["Sent Messages"].messages) == 1
+
+    def test_missing_sent_messages(self, server, writer):
+        del server.folders["Sent Messages"]
+        with pytest.raises(WriteFailed, match="Sent Messages folder not found"):
+            writer.append_sent(COPY)
+        assert "APPEND" not in [c[0] for c in server.commands]
+
+    def test_failed_append(self, server, writer):
+        server.fail_append = True
+        with pytest.raises(WriteFailed, match="^saving the sent copy failed$"):
+            writer.append_sent(COPY)
+
+    def test_connection_lost_during_append(self, server, writer, monkeypatch):
+        def drop(conn, *args):
+            raise imaplib.IMAP4.abort("socket error: EOF")
+
+        monkeypatch.setattr(FakeConn, "append", drop)
+        with pytest.raises(WriteFailed, match="connection failed"):
+            writer.append_sent(COPY)
+
+
+SENDER = {"send_from": "me@example.net"}
+
+
+class TestSend:
+    """mail_send at the service layer (add-mail-send), against fake SMTP and IMAP servers."""
+
+    @pytest.fixture
+    def make(self, server, tmp_path, smtp):
+        server.folder("Sent Messages")
+
+        def make(**config) -> Harness:
+            config.setdefault("alice_write", SENDER)
+            account = make_config(tmp_path, **config).account("alice")
+            h = Harness(server, account, tmp_path, write=True, smtp=smtp)
+            h.run_sync()
+            server.commands.clear()
+            return h
+
+        return make
+
+    @pytest.fixture
+    def h(self, make):
+        return make()
+
+    @staticmethod
+    def copies(server) -> list:
+        return list(server.folders["Sent Messages"].messages.values())
+
+    @staticmethod
+    def appends(server) -> list:
+        return [c for c in server.commands if c[0] == "APPEND"]
+
+    def test_sends_one_message_and_saves_one_copy(self, server, h, smtp):
+        before = server.all_flags()
+        out = h.service.send(to=["Bob <bob@example.com>"], subject="Lunch", body="Noon?")
+        [got] = smtp.received
+        assert (got.mail_from, got.rcpt_to) == ("me@example.net", ["bob@example.com"])
+        p = parse_message(got.data)
+        assert (p.from_, p.to, p.subject, p.body.strip()) == (
+            "me@example.net", "Bob <bob@example.com>", "Lunch", "Noon?"
+        )  # fmt: skip
+        [copy] = self.copies(server)
+        assert copy.flags == {"\\Seen"}
+        assert parse_message(copy.raw).message_id == p.message_id
+        assert out == {
+            "sent": True,
+            "message_id": p.message_id,
+            "recipients": 1,
+            "refused_recipients": [],
+            "sent_copy_saved": True,
+            "sent_copy_id": MailId("Sent Messages", 1, copy.uid).encode(),
+            "in_reply_to": None,
+        }
+        assert {k: v for k, v in server.all_flags().items() if k[0] != "Sent Messages"} == before
+
+    def test_sent_copy_is_readable(self, h):
+        out = h.service.send(to=["bob@example.com"], subject="Lunch", body="Noon?")
+        got = h.service.get(out["sent_copy_id"])
+        assert got["headers"]["subject"] == "Lunch"
+
+    def test_icloud_files_its_own_copy(self, server, h, smtp):
+        smtp.file_into = server
+        out = h.service.send(to=["bob@example.com"], subject="x", body="y")
+        [copy] = self.copies(server)
+        assert self.appends(server) == []
+        assert parse_message(copy.raw).message_id == out["message_id"]
+        assert out["sent_copy_saved"] is True
+        assert out["sent_copy_id"] == MailId("Sent Messages", 1, copy.uid).encode()
+
+    def test_failing_search_still_appends(self, server, h):
+        server.fail_header_search = True
+        out = h.service.send(to=["bob@example.com"], subject="x", body="y")
+        assert len(self.copies(server)) == 1 and len(self.appends(server)) == 1
+        assert out["sent_copy_saved"] is True
+
+    def test_failing_append_still_reports_the_send(self, server, h, smtp):
+        server.fail_append = True
+        out = h.service.send(to=["bob@example.com"], subject="x", body="y")
+        assert len(smtp.received) == 1
+        assert (out["sent"], out["sent_copy_saved"], out["sent_copy_id"]) == (True, False, None)
+        assert self.copies(server) == []
+
+    def test_dropped_after_data_may_have_been_sent(self, server, h, smtp):
+        smtp.drop_after_data = True
+        with pytest.raises(WriteFailed, match="^mail may have been sent; check Sent Messages"):
+            h.service.send(to=["bob@example.com"], subject="x", body="y")
+        assert self.appends(server) == [] and self.copies(server) == []
+
+    def test_no_sent_messages_fails_before_smtp(self, server, h, smtp):
+        del server.folders["Sent Messages"]
+        with pytest.raises(ToolInputError, match="^Sent Messages folder not found; nothing was"):
+            h.service.send(to=["bob@example.com"], subject="x", body="y")
+        assert smtp.connections == 0
+
+    def test_sent_messages_hidden_from_reads_still_gets_the_copy(self, server, make, monkeypatch):
+        h = make(alice_exclude=["Sent Messages"])
+        asked: list = []
+        monkeypatch.setattr(h.sync, "request_resync", lambda *names: asked.append(names))
+        out = h.service.send(to=["bob@example.com"], subject="x", body="y")
+        assert out["sent_copy_saved"] is True and len(self.copies(server)) == 1
+        assert asked == []  # out of the read scope: never synced
+
+    def test_resync_requested_when_in_scope(self, h, monkeypatch):
+        asked: list = []
+        monkeypatch.setattr(h.sync, "request_resync", lambda *names: asked.append(names))
+        h.service.send(to=["bob@example.com"], subject="x", body="y")
+        assert asked == [("Sent Messages",)]
+
+    def test_protected_sent_messages_does_not_block(self, server, make, smtp):
+        h = make(alice_write={**SENDER, "protected_folders": ["Sent Messages", "INBOX"]})
+        out = h.service.send(to=["bob@example.com"], subject="x", body="y")
+        assert out["sent_copy_saved"] is True and len(smtp.received) == 1
+
+    def test_bcc_only_in_the_envelope_and_the_copy(self, server, h, smtp):
+        h.service.send(
+            to=["a@example.com"],
+            cc=["c@example.com"],
+            bcc=["Hidden <Hidden@Example.org>"],
+            subject="x",
+            body="y",
+        )
+        [got] = smtp.received
+        assert got.rcpt_to == ["a@example.com", "c@example.com", "hidden@example.org"]
+        assert b"hidden" not in got.data.lower() and b"bcc" not in got.data.lower()
+        [copy] = self.copies(server)
+        assert b"Bcc: Hidden <Hidden@Example.org>" in copy.raw
+
+    def test_duplicate_recipients_get_one_envelope_entry(self, h, smtp):
+        out = h.service.send(to=["a@example.com"], cc=["A <A@example.com>"], subject="x")
+        assert smtp.received[0].rcpt_to == ["a@example.com"] and out["recipients"] == 1
+
+    def test_some_recipients_refused(self, h, smtp):
+        smtp.refuse_recipients = {"b@example.com"}
+        out = h.service.send(to=["a@example.com", "b@example.com"], subject="x")
+        assert (out["recipients"], out["refused_recipients"]) == (2, ["b@example.com"])
+
+    @pytest.mark.parametrize(
+        "kw",
+        [
+            {},
+            {"subject": "x", "body": "y"},
+            {"to": ["not an address"]},
+            {"to": [f"a{i}@example.com" for i in range(30)], "bcc": ["b@x.org"] * 21},
+            {"to": ["a@example.com"], "subject": "a\r\nBcc: x@example.com"},
+            {"to": ["a@example.com"], "subject": "s" * 999},
+            {"to": ["a@example.com"], "body": "b" * 100_001},
+        ],
+    )
+    def test_bad_input_reaches_neither_server(self, server, h, smtp, kw):
+        with pytest.raises(ToolInputError):
+            h.service.send(**kw)
+        assert server.commands == [] and smtp.connections == 0
+
+    @pytest.mark.parametrize(
+        ("send_to", "address"),
+        [
+            (("a@example.com",), "A@Example.COM"),
+            (("@example.org",), "Bob <Bob@Example.ORG>"),
+            (("a@example.com", "@example.org"), "z@example.org"),
+        ],
+    )
+    def test_send_to_allows(self, h, smtp, send_to, address):
+        h.service.send(to=[address], subject="x", send_to=send_to)
+        assert len(smtp.received) == 1
+
+    def test_send_to_refuses_before_anything_is_read_or_sent(self, server, h, smtp):
+        with pytest.raises(ToolInputError) as err:
+            h.service.send(
+                to=["a@example.com", "x@mail.example.org"],
+                cc=["Y <Y@other.test>"],
+                bcc=["x@mail.example.org", "z@example.org"],
+                subject="x",
+                send_to=("a@example.com", "@example.org"),
+            )
+        assert str(err.value) == (
+            "recipients not allowed for this token: x@mail.example.org, y@other.test"
+        )
+        assert server.commands == [] and smtp.connections == 0
+
+    def test_replying_does_not_allow_the_original_sender(self, server, h, smtp):
+        uid = deliver(server, "INBOX", from_="b@example.net", message_id="<o@x>")
+        server.commands.clear()
+        with pytest.raises(ToolInputError, match="not allowed for this token: b@example.net$"):
+            h.service.send(
+                to=["b@example.net"],
+                in_reply_to=MailId("INBOX", 1, uid).encode(),
+                send_to=("a@example.com",),
+            )
+        assert server.commands == [] and smtp.connections == 0  # the original was not read
+
+    def test_reply_threading_keeps_the_original_unread(self, server, h, smtp):
+        uid = deliver(server, "INBOX", subject="Plans", message_id="<m2@x>", references=["<m1@x>"])
+        mid = MailId("INBOX", 1, uid).encode()
+        out = h.service.send(to=["alice@example.com"], body="Sounds good", in_reply_to=mid)
+        p = parse_message(smtp.received[0].data)
+        assert (p.in_reply_to, p.references, p.subject) == (
+            "<m2@x>", ["<m1@x>", "<m2@x>"], "Re: Plans"
+        )  # fmt: skip
+        assert server.folders["INBOX"].messages[uid].flags == set()
+        assert out["in_reply_to"] == mid
+
+    def test_imap_sees_only_reads_and_one_append(self, server, h):
+        uid = deliver(server, "INBOX", message_id="<m@x>")
+        server.commands.clear()
+        h.service.send(to=["a@example.com"], in_reply_to=MailId("INBOX", 1, uid).encode())
+        names = {c[0] for c in server.commands}
+        assert names <= {
+            "CAPABILITY", "LOGIN", "ENABLE", "LIST", "STATUS", "EXAMINE", "UID", "APPEND",
+            "LOGOUT", "NOOP",
+        }  # fmt: skip
+        assert {c[1] for c in server.commands if c[0] == "UID"} == {"FETCH", "SEARCH"}
+        assert self.appends(server) == [("APPEND", '"Sent Messages"', "(\\Seen)")]
+        searches = [c for c in server.commands if c[:2] == ("UID", "SEARCH")]
+        assert [c[2:4] for c in searches] == [("HEADER", "Message-ID")]
+
+    def test_without_a_sender_nothing_is_sent(self, server, tmp_path, smtp):
+        server.folder("Sent Messages")
+        account = make_config(tmp_path, alice_write=SENDER).account("alice")
+        h = Harness(server, account, tmp_path, write=True)  # no SMTP sender
+        with pytest.raises(ToolInputError, match="not enabled"):
+            h.service.send(to=["a@example.com"], subject="x")
+        assert smtp.connections == 0
+
+
 class TestFolderResolution:
+    def test_sent_by_attribute_then_by_name(self):
+        assert find_sent({"Gesendet": frozenset({"\\sent"}), "Sent Messages": frozenset()}) == (
+            "Gesendet"
+        )
+        assert find_sent({"INBOX": frozenset(), "Sent Messages": frozenset()}) == "Sent Messages"
+        assert find_sent({"INBOX": frozenset()}) is None
+
     def test_trash_by_attribute_then_by_name(self):
         assert find_trash({"Bin": frozenset({"\\trash"}), "Deleted Messages": frozenset()}) == (
             "Bin"

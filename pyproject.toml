@@ -44,6 +44,7 @@ select = ["E", "F", "I", "B", "UP", "SIM"]
 
 [dependency-groups]
 dev = [
+    "cryptography>=50.0.2",
     "httpx>=0.28.1",
     "mypy>=2.4.0",
     "pytest>=9.1.1",

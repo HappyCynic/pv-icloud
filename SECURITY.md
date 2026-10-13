@@ -25,8 +25,8 @@ can only send `PROPFIND` and `REPORT`. The IMAP read path opens folders with `EX
 fetches with `BODY.PEEK`, so reading never changes read state. A way to change iCloud data
 without the switch and a grant described below is a vulnerability.
 
-**Optional mail write access** ([ADR-0004](docs/adr/0004-opt-in-mail-write.md); being
-implemented in stages). Writes need both the deployment switch `PV_ICLOUD_MAIL_WRITE=enabled`
+**Optional mail write access** ([ADR-0004](docs/adr/0004-opt-in-mail-write.md)). Writes
+need both the deployment switch `PV_ICLOUD_MAIL_WRITE=enabled`
 and a per-token grant (`move`, `archive`, `delete`, `draft`, `send`, each separately). Deletes
 only move mail to Deleted Messages, where it is recoverable until iCloud empties that folder;
 the server never permanently deletes. A message is removed from its source folder only after
