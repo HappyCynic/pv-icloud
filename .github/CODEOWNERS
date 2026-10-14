@@ -7,7 +7,7 @@
 # Listed explicitly so these stay owned even if the default above changes: CI and repository
 # settings, the container build, dependencies, the security policy, the modules that keep the
 # read path read-only (DAV methods and IMAP read commands), and the only modules allowed to
-# change mail (ADR-0004; created by the add-mail-write-core change).
+# change mail, calendars or contacts (ADR-0004, ADR-0005, ADR-0006).
 /.github/                 @mwklein
 /Dockerfile               @mwklein
 /pyproject.toml           @mwklein
@@ -17,6 +17,8 @@
 /src/pv_icloud/mail/imap.py @mwklein
 /src/pv_icloud/mail/imap_write.py @mwklein
 /src/pv_icloud/mail/smtp.py @mwklein
+/src/pv_icloud/cal/caldav_write.py @mwklein
+/src/pv_icloud/contacts/carddav_write.py @mwklein
 
 # Agent instructions and configuration: what the agent reads before it acts.
 /CLAUDE.md                @mwklein

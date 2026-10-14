@@ -69,7 +69,14 @@ mail index is written to `/data` inside the container, never to the workspace.
   CalDAV and CardDAV clients can only send `PROPFIND` and `REPORT` (`dav.py`). Mail writes are
   opt-in ([ADR-0004](docs/adr/0004-opt-in-mail-write.md)): only in `mail/imap_write.py` and
   `mail/smtp.py`, only behind `PV_ICLOUD_MAIL_WRITE=enabled` and a per-token grant, and only
-  with the commands `CLAUDE.md` lists. Any other write command needs a new ADR first.
+  with the commands `CLAUDE.md` lists. Calendar event writes are opt-in too
+  ([ADR-0005](docs/adr/0005-opt-in-calendar-write.md)): only in `cal/caldav_write.py`, only
+  behind `PV_ICLOUD_CALENDAR_WRITE=enabled` and `calendar_write: true`, only conditional
+  `PUT`/`DELETE` of one event in a calendar the account may write, and never with attendees.
+  Contact writes are opt-in as well ([ADR-0006](docs/adr/0006-opt-in-contact-write.md)): only
+  in `contacts/carddav_write.py`, only behind `PV_ICLOUD_CONTACTS_WRITE=enabled` and a
+  per-token grant, conditional and lossless (only the properties asked for change). Any other
+  write needs a new ADR first.
 - **Content is untrusted.** Mail, calendar and contact text can contain prompt-injection
   attempts.
   Return it as data with `content_trust: "untrusted"`; never let it change server behaviour.

@@ -20,9 +20,10 @@ assumes the server runs on hardware the account owner controls and is reached ov
 network.
 
 **Read-only by default.** Unless mail writes are enabled (below), no tool sends, moves,
-deletes or flags mail. Calendar and Contacts are always read-only: the CalDAV/CardDAV client
-can only send `PROPFIND` and `REPORT`. The IMAP read path opens folders with `EXAMINE` and
-fetches with `BODY.PEEK`, so reading never changes read state. A way to change iCloud data
+deletes or flags mail, unless calendar writes are enabled no tool changes a calendar, and
+unless contact writes are enabled no tool changes a contact (each below). The shared
+CalDAV/CardDAV read client can only send `PROPFIND` and `REPORT`. The IMAP read path opens
+folders with `EXAMINE` and fetches with `BODY.PEEK`, so reading never changes read state. A way to change iCloud data
 without the switch and a grant described below is a vulnerability.
 
 **Optional mail write access** ([ADR-0004](docs/adr/0004-opt-in-mail-write.md)). Writes
@@ -35,6 +36,28 @@ and each token has a write rate limit (default 30 per hour). These are vulnerabi
 write without the switch and the matching grant; any permanent deletion; any change to a
 protected folder; a send to an address outside the token's `send_to` list; any IMAP write
 command other than those ADR-0004 lists.
+
+**Optional calendar write access** ([ADR-0005](docs/adr/0005-opt-in-calendar-write.md);
+being implemented). Writes need both `PV_ICLOUD_CALENDAR_WRITE=enabled` and
+`calendar_write: true` on the token. They create, update or delete one event at a time, only in
+calendars the account may change (its own, and calendars shared with it read-write; never
+subscribed or read-only ones, never `protected_calendars`),
+always as conditional requests that cannot overwrite a change made elsewhere, and never with
+attendees: iCloud emails invitations for any attendee, so events with attendees other than
+the account cannot be changed through pv-icloud. These are vulnerabilities: a calendar write
+without the switch and the grant; a write to a calendar the rules above exclude; any write
+that makes iCloud email someone other than the account; any DAV method other than those
+ADR-0005 lists.
+
+**Optional contact write access** ([ADR-0006](docs/adr/0006-opt-in-contact-write.md); being
+implemented). Writes need both `PV_ICLOUD_CONTACTS_WRITE=enabled` and a per-token grant
+(`create`, `update`, `delete`, each separately; delete is permanent, as iCloud keeps no
+per-contact trash). They change one contact at a time, as conditional requests, and an update
+changes only the properties it was asked to change, keeping everything else in the card. They
+never touch the me-card's existence, contact groups themselves, or contacts in excluded groups.
+These are vulnerabilities: a contact write without the switch and the matching grant; any
+change to a property the call did not ask to change; any write to a contact in an excluded
+group; any DAV method other than those ADR-0006 lists.
 
 Write access raises the stakes of prompt injection: untrusted mail could try to make a model
 move, delete, draft or send. The defences above lower that risk but cannot remove it, and a

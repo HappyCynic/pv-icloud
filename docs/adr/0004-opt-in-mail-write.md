@@ -7,7 +7,9 @@
   send, granted per bearer token because different clients deserve different trust. Writes
   change the threat model: prompt injection in untrusted mail could now cause actions, and a
   sent message cannot be recalled. Calendar and Contacts are not part of this decision and
-  stay read-only.
+  stay read-only. *(Amended 2026-10-14: calendar event writes are decided separately in
+  [ADR-0005](0005-opt-in-calendar-write.md), contact writes in
+  [ADR-0006](0006-opt-in-contact-write.md).)*
 
 ## Decision
 
