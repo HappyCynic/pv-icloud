@@ -28,11 +28,33 @@ startup with an error naming the account, the token label, `calendar_write` and
 - **THEN** the config loads, the token can draft mail, and no calendar write tool is
   registered
 
+### Requirement: Calendar write settings per account
+Each account's `calendar` section (merged from `defaults.calendar` as usual) MAY contain
+`write` with `protected_calendars`, a list of calendar display names (default empty). The
+protected calendars that apply to an account SHALL be every name listed in
+`defaults.calendar.write.protected_calendars` and in the account's own
+`calendar.write.protected_calendars`: an account list adds to the defaults and never replaces
+them. Names SHALL match calendar display names exactly (case-sensitive, no globs). A value of
+the wrong type, or an unknown key under `calendar.write`, SHALL stop startup with an error
+naming the account and key. These settings SHALL be accepted whether or not
+`PV_ICLOUD_CALENDAR_WRITE` is enabled, and SHALL NOT affect any read tool.
+
+#### Scenario: Defaults and account both protect calendars
+- **WHEN** `defaults.calendar.write.protected_calendars` is `[Family]` and an account's is
+  `[Work]`
+- **THEN** both `Family` and `Work` are protected for that account, and both are still listed
+  by `calendar_list`
+
+#### Scenario: Unknown key
+- **WHEN** an account sets `calendar.write.protected: [Work]`
+- **THEN** loading the config fails with an error naming the account and
+  `calendar.write.protected`
+
 ## MODIFIED Requirements
 
 ### Requirement: Token permissions reach every call
-The permissions (mail write actions and `calendar_write`), protected folders and write limit
-of the token a request authenticated with SHALL apply to every tool call in that request, and
+The permissions (mail write actions and `calendar_write`), protected folders, protected
+calendars and write limit of the token a request authenticated with SHALL apply to every tool call in that request, and
 to nothing else: two tokens of the same account SHALL each get only their own. Audit lines
 SHALL keep identifying the token only by its label.
 
@@ -53,7 +75,8 @@ MUST have a non-empty `label` and a `sha256` of exactly 64 hexadecimal character
 lower case), and no two tokens in the whole file MAY share a hash. A token MAY also have:
 `mail_write`, a list of actions from `move`, `archive`, `delete`, `draft` and `send` (default
 empty); `calendar_write`, `true` or `false` (default `false`); `protected_folders`, a list of
-folder names (default empty); `max_writes_per_hour`, a positive integer (default 30) that
+folder names (default empty); `protected_calendars`, a list of calendar display names (default
+empty) added to the account's protected calendars for that token only; `max_writes_per_hour`, a positive integer (default 30) that
 limits the token's mail and calendar write calls together; and `send_to`, only on a token
 with `send`, a non-empty list whose entries are each a single bare address (`local@domain`)
 or `@` followed by a domain (default absent: any recipient). Any other value for these keys,
@@ -94,13 +117,22 @@ naming the account, the token label and the key.
 - **WHEN** a token has `calendar_write: [create]` or `calendar_write: "yes"`
 - **THEN** loading the config fails with an error naming the token and `calendar_write`
 
+#### Scenario: Token protects a calendar
+- **WHEN** a token has `calendar_write: true` and `protected_calendars: [Work]`
+- **THEN** it loads, and `Work` is protected for that token in addition to the account's
+  protected calendars
+
+#### Scenario: Protected calendars not a list
+- **WHEN** a token has `protected_calendars: Work`
+- **THEN** loading the config fails with an error naming the token and `protected_calendars`
+
 #### Scenario: Invalid write limit
 - **WHEN** a token has `max_writes_per_hour: 0`
 - **THEN** loading the config fails with an error naming the token and `max_writes_per_hour`
 
 #### Scenario: Token without write keys
 - **WHEN** a token has only `label` and `sha256`
-- **THEN** it loads with no write actions, calendar write off, no extra protected folders, a
+- **THEN** it loads with no write actions, calendar write off, no extra protected folders or calendars, a
   write limit of 30 per hour and no `send_to`
 
 #### Scenario: send_to without send

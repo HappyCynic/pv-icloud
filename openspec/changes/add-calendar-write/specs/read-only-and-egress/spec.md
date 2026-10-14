@@ -104,19 +104,23 @@ SHALL still send only `PROPFIND` and `REPORT`.
 
 ### Requirement: Calendar write DAV methods
 Only the calendar write tools SHALL send DAV requests other than `PROPFIND` and `REPORT`, and
-only: `PUT` of one event resource (`<name>.ics`, a direct child of an in-scope event calendar
-of the caller's account) with `If-None-Match: *` or `If-Match`, and `DELETE` of one such
-resource with `If-Match`. Each SHALL carry `Schedule-Reply: F`. The server MUST NOT send
-`PUT` or `DELETE` without one of those preconditions, to a calendar collection, to a
-subscribed calendar or to any CardDAV URL, and MUST NOT send `MKCALENDAR`, `PROPPATCH`,
-`MOVE`, `COPY`, `POST` or any other write method. Code that sends `PUT` or `DELETE` SHALL live
-only in `src/pv_icloud/cal/caldav_write.py`, and that module SHALL NOT be imported when
-`PV_ICLOUD_CALENDAR_WRITE` is not `enabled`.
+only: `PUT` of one event resource (`<name>.ics`, a direct child of a writable calendar of the
+caller's account as defined by the `calendar-write-tools` capability) with
+`If-None-Match: *` to create or `If-Match` to update, and `DELETE` of one such resource with
+`If-Match`, where an `If-Match` ETag always comes from a read of that resource in the same
+call. Each SHALL carry `Schedule-Reply: F`. The server MUST NOT send `PUT` or `DELETE`
+without one of those preconditions, to a calendar collection, to a subscribed, protected or
+non-writable calendar or to any CardDAV URL; MUST NOT write `ORGANIZER` or `ATTENDEE`; and
+MUST NOT send `MKCALENDAR`, `MKCOL`, `PROPPATCH`, `MOVE`, `COPY`, `ACL`, `LOCK`, `POST` or any
+other write method. A 412 answer SHALL be reported and never retried automatically. Code that
+sends `PUT` or `DELETE` SHALL live only in `src/pv_icloud/cal/caldav_write.py`, and that
+module SHALL NOT be imported when `PV_ICLOUD_CALENDAR_WRITE` is not `enabled`.
 
 #### Scenario: Requests seen during an update
-- **WHEN** a caller updates one event
-- **THEN** iCloud sees a `calendar-query` `REPORT`, a `calendar-multiget` `REPORT` of that
-  resource and one `PUT` with `If-Match` to that resource, and no other write request
+- **WHEN** a caller updates one event and the calendar list and account addresses are
+  already cached
+- **THEN** iCloud sees one `REPORT` reading that resource and its ETag, then one `PUT` with
+  `If-Match` set to that ETag and `Schedule-Reply: F`, and no other write request
 
 #### Scenario: Calendar write switch off
 - **WHEN** the server runs without `PV_ICLOUD_CALENDAR_WRITE=enabled`
