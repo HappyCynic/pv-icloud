@@ -143,13 +143,13 @@ Each group ends with its tests passing.
 
 ## 9. Docs and checks
 
-- [ ] 9.1 Update README.md (switch, tools, `contacts_write` actions, lossless updates, groups,
+- [x] 9.1 Update README.md (switch, tools, `contacts_write` actions, lossless updates, groups,
   delete is permanent), docs/design.md (Goals, Tools table, the in-memory contacts cache
   section, a "Contact writes" section on lossless edits, group membership, fresh reads and
   conditional writes), CONTRIBUTING.md and SECURITY.md wherever they still say Contacts are
   read-only, and docs/egress.md if it describes CardDAV methods; add `Unreleased` entries to
   CHANGELOG.md for the switch, `contacts_write` and the three tools.
-- [ ] 9.2 Run `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`,
+- [x] 9.2 Run `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`,
   `uv run mypy` and `openspec validate --all --strict`; all pass.
 
 ## 10. Live check (maintainer, before merge)
