@@ -139,13 +139,13 @@ approved the proposal. Each group ends with its tests passing.
 
 ## 9. Docs and checks
 
-- [ ] 9.1 Update README.md (switch, tools, config including `protected_calendars`, shared
+- [x] 9.1 Update README.md (switch, tools, config including `protected_calendars`, shared
   calendars, the no-attendees rule), docs/design.md (Goals, Tools table, a "Calendar writes"
   section on writable calendars, fresh reads and conditional writes, occurrence edits and why
   attendees are refused), CONTRIBUTING.md and SECURITY.md wherever they still say Calendar is
   read-only, and docs/egress.md if it describes CalDAV methods; add `Unreleased` entries to
   CHANGELOG.md for the switch, `calendar_write`, `protected_calendars` and the three tools.
-- [ ] 9.2 Run `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`,
+- [x] 9.2 Run `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`,
   `uv run mypy` and `openspec validate --all --strict`; all pass.
 
 ## 10. Live check (maintainer, before merge)

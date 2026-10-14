@@ -213,16 +213,15 @@ iCloud ignores `SCHEDULE-AGENT=CLIENT`, so the only safe rule is never to write 
 event iCloud would schedule:
 
 - The tools take no attendees, and pv-icloud never writes `ORGANIZER` or `ATTENDEE`.
-- Update and delete are **refused**, after the fresh read and before any write, when the
-  target event or occurrence (the override if there is one, else the master):
+- Update and delete are **refused**, after the fresh read and before any write, when any
+  event in the stored resource (the target, the series master or any other override):
   - has an `ORGANIZER` that is not the account itself, with `this event was organised by
     someone else; change it in Calendar`; or
   - has any `ATTENDEE` that is not the account itself, with `event has attendees; change it
     in Calendar`.
 
-  For occurrence edits that add an override, the master is checked, since the override is
-  copied from it. For an occurrence delete (an `EXDATE` on the master), the master and the
-  occurrence's override, if any, are both checked.
+  The whole resource is checked, not only the target: a `PUT` rewrites every component in
+  it, an override is copied from the master, and an occurrence delete changes the master.
 - **"The account itself"** is a value that is one of the account's addresses: a `mailto:`
   address in the principal's `calendar-user-address-set` (read once with `PROPFIND` and
   cached per account), or a principal path (any value that is not `mailto:`) whose `EMAIL=`

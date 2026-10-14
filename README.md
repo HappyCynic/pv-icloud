@@ -8,7 +8,8 @@ A [Model Context Protocol](https://modelcontextprotocol.io) server, **read-only 
 that lets MCP clients (Claude Code, Claude Desktop, …) search and read **iCloud Mail**,
 **Calendar** and **Contacts**. One server can serve several iCloud accounts; each bearer token
 maps to exactly one account. Moving, archiving and deleting mail can be switched on per
-deployment and granted per token ([Mail writes](#mail-writes-opt-in)); Calendar and Contacts
+deployment and granted per token ([Mail writes](#mail-writes-opt-in)), and so can creating,
+changing and deleting calendar events ([Calendar writes](#calendar-writes-opt-in)); Contacts
 are always read-only.
 
 > **Status:** early. Mail, calendar and contacts tools work against real iCloud. Interfaces may change
@@ -33,11 +34,11 @@ are always read-only.
 | `contacts_get` | One contact: names, emails, phones and addresses with labels, birthday, dates, related names, social profiles, groups, note |
 | `contacts_groups` | Contact groups with member counts |
 
-Unless [mail writes](#mail-writes-opt-in) are switched on and granted, there are **no** tools
-that send, move, delete or flag mail, change events or change contacts. The IMAP read path
-never issues write commands (folders are opened with `EXAMINE` and messages fetched with
-`BODY.PEEK`, so read state never changes), and the CalDAV and CardDAV clients can only send
-`PROPFIND` and `REPORT`.
+Unless [mail writes](#mail-writes-opt-in) or [calendar writes](#calendar-writes-opt-in) are
+switched on and granted, there are **no** tools that send, move, delete or flag mail, change
+events or change contacts. The IMAP read path never issues write commands (folders are opened
+with `EXAMINE` and messages fetched with `BODY.PEEK`, so read state never changes), and the
+CalDAV and CardDAV read clients can only send `PROPFIND` and `REPORT`.
 
 ### Mail writes (opt-in)
 
@@ -96,6 +97,48 @@ granted on its own; a token sees only the tools it was granted, and a token with
 
 Prompt injection in mail can now cause actions, not just reads. Grant writes only to clients
 that confirm actions with a person; see [SECURITY.md](SECURITY.md).
+
+### Calendar writes (opt-in)
+
+Off unless the deployment sets `PV_ICLOUD_CALENDAR_WRITE=enabled` **and** a token has
+`calendar_write: true` ([ADR-0005](docs/adr/0005-opt-in-calendar-write.md)). The two switches
+are independent of the mail ones; a token without `calendar_write` sees exactly the tools it
+saw before.
+
+| Tool | Purpose |
+|---|---|
+| `calendar_event_create` | Create one event, single or recurring: title, start and end (timed, or all-day dates), time zone, location, notes, display alerts, and a simple `recurrence` (daily, weekly on chosen days, monthly or yearly; `interval`; `count` or `until`) |
+| `calendar_event_update` | Change the given fields of one event, or of **one occurrence** of a series (the others stay as they are); `clear` removes location, notes or alerts |
+| `calendar_event_delete` | Delete one event, or one occurrence of a series. **Cannot be undone** by pv-icloud. |
+
+- **Which calendars:** only in-scope calendars of the account that it may change: its own,
+  and calendars shared with it read-write (a change there is seen by everyone sharing it).
+  Subscribed calendars, calendars shared read-only and protected calendars stay read-only:
+  a write to them fails with `unknown calendar`, exactly like a calendar that does not exist.
+- **Protected calendars** (`calendar.write.protected_calendars` in the defaults and per
+  account, plus a token's own `protected_calendars`; exact display names): readable, never
+  written.
+- **No attendees, no email.** iCloud sends invitations, updates and cancellations itself for
+  any event with attendees, and ignores the standard way to ask it not to. So these tools
+  take no attendees, and they refuse to change or delete an event that has attendees other
+  than the account, or that someone else organised: change those in Calendar. Every write
+  also sends `Schedule-Reply: F`.
+- **Safe with other devices:** before every change or delete the event is read again from
+  iCloud, and the write is conditional on it not having changed since (`If-Match`). If it
+  changed in Calendar (or an attendee's reply changed it on the server) in between, the call
+  fails with `the event changed in Calendar; read it again`, and the other change is kept.
+  Nothing is retried.
+- **Times:** ISO datetimes in an IANA time zone (default: the account's, as `calendar_list`
+  shows), written with that zone; all-day events take dates with an inclusive last day, as
+  the read tools return them.
+- **Limits:** one event per call; title up to 255 characters, location 1000, notes 10,000; at
+  most 5 alerts; an event lasts at most 366 days. The token's `max_writes_per_hour` counts
+  mail and calendar writes together.
+- Write calls are audited with `"write": true` and no event content: no title, notes,
+  location, times, time zone or calendar name.
+
+Out of scope: attendees, moving an event to another calendar, editing or deleting a whole
+series at once ("this and following"), creating or deleting calendars, and Reminders.
 
 **Contacts** are kept in memory only (never written to disk): the first call (or startup)
 loads the address book, and later calls fetch only what changed, at most once a minute.
@@ -211,7 +254,8 @@ See [`config/pv-icloud.example.yaml`](config/pv-icloud.example.yaml). Per accoun
 | `calendar.max_range_days` | `90` | Longest `calendar_events` range |
 | `calendar.max_search_days` | `730` | Longest `calendar_search` range |
 | `calendar.subscriptions` | `true` (example config: `false`) | Fetch subscribed (webcal) feeds from their publishers; `false` lists them without events |
-| `calendar.timezone` | from iCloud | Zone for date-only ranges (IANA name, e.g. `Europe/Berlin`) |
+| `calendar.timezone` | from iCloud | Zone for date-only ranges and new events (IANA name, e.g. `Europe/Berlin`) |
+| `calendar.write.protected_calendars` | `[]` | Calendar display names (exact) that calendar writes never change; an account's list adds to the defaults' |
 | `contacts.enabled` | `true` | Contacts tools for this account; `find_person` then uses mail only |
 | `contacts.exclude_groups` | `[]` | Hide every contact in these groups (names, globs allowed) |
 
@@ -221,14 +265,17 @@ Per token (under `accounts[].tokens[]`, besides `label` and `sha256`):
 |---|---|---|
 | `mail_write` | `[]` | Mail write actions this token may use: `move`, `archive`, `delete`, `draft`, `send`. Needs `PV_ICLOUD_MAIL_WRITE=enabled`, otherwise startup fails |
 | `protected_folders` | `[]` | Added to the account's protected folders for this token only |
-| `max_writes_per_hour` | `30` | This token's write limit (sliding hour, held in memory) |
+| `calendar_write` | `false` | `true`: this token may create, change and delete events. Needs `PV_ICLOUD_CALENDAR_WRITE=enabled`, otherwise startup fails |
+| `protected_calendars` | `[]` | Added to the account's protected calendars for this token only |
+| `max_writes_per_hour` | `30` | This token's write limit for mail and calendar writes together (sliding hour, held in memory) |
 | `send_to` | unset (anyone) | Only with `send`: the recipients `mail_send` may reach, as bare addresses or `@domain` entries. Unset: anyone, with a startup warning |
 
 Environment: `PV_ICLOUD_CONFIG` (config path), `PV_ICLOUD_DATA_DIR` (index root),
 `PV_ICLOUD_PORT` (default 8771), `PV_ICLOUD_HOST` (default `127.0.0.1`; the image sets
 `0.0.0.0`; any non-loopback address logs a plain-HTTP warning at startup),
 `PV_ICLOUD_LOG_LEVEL`, `PV_ICLOUD_MAIL_WRITE` (`enabled` turns mail writes on; unset, empty
-or `disabled` leaves them off; any other value is a config error).
+or `disabled` leaves them off; any other value is a config error), `PV_ICLOUD_CALENDAR_WRITE`
+(the same for calendar writes).
 
 ## Resources and backups
 

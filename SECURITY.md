@@ -37,9 +37,10 @@ write without the switch and the matching grant; any permanent deletion; any cha
 protected folder; a send to an address outside the token's `send_to` list; any IMAP write
 command other than those ADR-0004 lists.
 
-**Optional calendar write access** ([ADR-0005](docs/adr/0005-opt-in-calendar-write.md);
-being implemented). Writes need both `PV_ICLOUD_CALENDAR_WRITE=enabled` and
-`calendar_write: true` on the token. They create, update or delete one event at a time, only in
+**Optional calendar write access** ([ADR-0005](docs/adr/0005-opt-in-calendar-write.md)).
+Writes need both `PV_ICLOUD_CALENDAR_WRITE=enabled` and
+`calendar_write: true` on the token. They create, update or delete one event (or one
+occurrence of a series) at a time, count against the token's hourly write limit, only in
 calendars the account may change (its own, and calendars shared with it read-write; never
 subscribed or read-only ones, never `protected_calendars`),
 always as conditional requests that cannot overwrite a change made elsewhere, and never with

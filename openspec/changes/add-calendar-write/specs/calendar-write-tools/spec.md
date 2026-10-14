@@ -206,8 +206,9 @@ change and the event should be read again before retrying.
 No calendar write SHALL cause iCloud to send an invitation, update, cancellation or reply to
 anyone. The server SHALL NOT write `ORGANIZER` or `ATTENDEE` properties, and every write
 request SHALL carry `Schedule-Reply: F`. Update and delete SHALL be refused, after the fresh
-read and before any write request, when the event or occurrence concerned (and, when an
-override would be added or an `EXDATE` set, the series master) has an `ORGANIZER` that is not
+read and before any write request, when any event in the stored resource (the event or
+occurrence concerned, the series master or another occurrence's override: a `PUT` rewrites
+them all) has an `ORGANIZER` that is not
 the account itself (`this event was organised by someone else; change it in Calendar`) or any
 `ATTENDEE` that is not the account itself (`event has attendees; change it in Calendar`). A
 value is the account itself when it is a `mailto:` address in the account principal's

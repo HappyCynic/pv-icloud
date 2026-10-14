@@ -8,14 +8,16 @@ How Private iCloud MCP (`pv-icloud`) works and why. Decisions with more backgrou
 - Let an MCP client search and read one person's **iCloud Mail, Calendar and Contacts**.
 - **Read-only by default**: no read path can change iCloud data or read state. Moving,
   archiving and deleting mail exist only when the deployment switches them on and a token is
-  granted them ([Mail writes](#mail-writes); ADR-0004). Calendar and Contacts are always
-  read-only.
+  granted them ([Mail writes](#mail-writes); ADR-0004), and so do creating, changing and
+  deleting calendar events ([Calendar writes](#calendar-writes); ADR-0005). Contacts are
+  always read-only.
 - Serve **several iCloud accounts** from one server, each strictly isolated (ADR-0003).
 - Fast enough for interactive use: cross-folder mail search well under a second.
 - Run on a small always-on host (a home server or NAS), not on a Mac.
 
 Out of scope: Reminders and Notes (iCloud does not expose current Reminders or Notes over a
-standard protocol; ADR-0002), and any write action other than the opt-in mail writes.
+standard protocol; ADR-0002), and any write action other than the opt-in mail and calendar
+writes.
 
 ## Overview
 
@@ -38,9 +40,9 @@ client and a CardDAV client with an in-memory contacts cache.
 | `auth` | Bearer token → account (SHA-256, constant-time) |
 | `server` | Tool definitions, audit log, `/healthz`, per-account runtime |
 | `mail/` | IMAP pool, message parsing, HTML → text, FTS5 index, sync worker, tools; `mail/imap_write.py` is the only code that changes mail (loaded only when writes are on) |
-| `ratelimit` | Per-token mail write limit (in memory) |
+| `ratelimit` | Per-token write limit, mail and calendar together (in memory) |
 | `dav` | Read-only WebDAV base (`PROPFIND`/`REPORT` only), shared throttle |
-| `cal/` | CalDAV client, subscribed-feed fetcher, recurrence expansion, event ids, tools |
+| `cal/` | CalDAV client, subscribed-feed fetcher, recurrence expansion, event ids, tools; `cal/caldav_write.py` is the only code that changes calendars and `cal/compose.py` builds the events it writes (both loaded only when calendar writes are on) |
 | `contacts/` | CardDAV client, vCard parser, contacts cache and tools |
 | `people` | `find_person`: contacts joined with the mail index |
 
@@ -65,9 +67,14 @@ client and a CardDAV client with an in-memory contacts cache.
 | `mail_delete` | *Opt-in write.* Moves one message to Deleted Messages (never a permanent delete) |
 | `mail_draft` | *Opt-in write.* Saves one plain-text draft in Drafts, optionally as a reply; never sends |
 | `mail_send` | *Opt-in write.* Sends one plain-text message through iCloud SMTP and keeps one copy in Sent Messages; cannot be undone |
+| `calendar_event_create` | *Opt-in write.* Creates one event, single or recurring, without attendees |
+| `calendar_event_update` | *Opt-in write.* Changes the given fields of one event or one occurrence |
+| `calendar_event_delete` | *Opt-in write.* Deletes one event or one occurrence; cannot be undone |
 
-The write tools exist only with `PV_ICLOUD_MAIL_WRITE=enabled` and are listed only to tokens
-granted them; see [Mail writes](#mail-writes).
+The mail write tools exist only with `PV_ICLOUD_MAIL_WRITE=enabled` and are listed only to
+tokens granted them; see [Mail writes](#mail-writes). The calendar write tools exist only
+with `PV_ICLOUD_CALENDAR_WRITE=enabled` and are listed only to tokens with `calendar_write`;
+see [Calendar writes](#calendar-writes).
 
 Conventions shared by all tools:
 
@@ -229,7 +236,8 @@ each with its own flags), and the fake SMTP server fails a test that sends `AUTH
 
 ## Calendar
 
-A small CalDAV client on `httpx` (only `PROPFIND` and `REPORT` can be sent). Discovery goes
+A small CalDAV client on `httpx` (only `PROPFIND` and `REPORT` can be sent; the opt-in
+[calendar writes](#calendar-writes) have their own module). Discovery goes
 from `caldav.icloud.com` to the account's `pNN-caldav.icloud.com` home.
 
 - **Events** come from one `calendar-query` per calendar with `<C:expand>`: iCloud expands
@@ -257,6 +265,69 @@ from `caldav.icloud.com` to the account's `pNN-caldav.icloud.com` home.
     feed. A common publisher error (`P12H` for `PT12H`) is repaired before parsing.
 
 One failing calendar is reported in the result's `errors` while the rest are returned.
+
+## Calendar writes
+
+Creating, changing and deleting events (ADR-0005) follows the pattern of mail writes: a
+deployment switch (`PV_ICLOUD_CALENDAR_WRITE=enabled`; without it `cal/caldav_write.py` and
+`cal/compose.py` are never imported and no calendar write tool is registered), a per-token
+grant (`calendar_write: true`; a grant without the switch is a config error), a per-token
+tools list and instructions, protected calendars, the token's hourly write limit (shared with
+mail writes) and audit lines with `write: true` and no content. Every argument of a calendar
+write is redacted in the audit line, times included.
+
+**Writable calendars.** The calendar list's `PROPFIND` also asks for each calendar's
+`current-user-privilege-set`. A write reaches only an in-scope calendar of kind `calendar`
+whose privileges include `write-content` (directly or through `write` or `all`): the
+account's own calendars and calendars shared with it read-write. Subscribed calendars,
+calendars shared read-only, calendars in `calendar.write.protected_calendars` (defaults plus
+account) or in the token's `protected_calendars` (exact display names) all fail with the same
+`unknown calendar` error as a missing or excluded one, before anything is sent, so iCloud's
+403 is never relied on. An event id's resource path must be a direct `.ics` child of that
+calendar.
+
+**Fresh reads and conditional writes.** `cal/caldav_write.py` is the only module that sends
+`PUT` or `DELETE`, always for one event resource, always with `Schedule-Reply: F`, and always
+conditional: a new event (a random UUID as both `UID` and resource name) is a `PUT` with
+`If-None-Match: *`; an update or delete first re-reads that one resource with a single-href
+`calendar-multiget` (unexpanded; iCloud answers a Depth 0 `calendar-query` on a resource URL
+with 403) and sends `If-Match` with exactly the ETag it just read. A 412 means the event
+changed in Calendar, or an attendee's reply changed it on the server, since that read: the
+call fails with `the event changed in Calendar; read it again`, and the other change stays.
+Nothing is retried, not even after a timeout (which is reported as unconfirmed); 429 and 503
+pause the account's CalDAV and CardDAV requests like a read would. `dav.py` is unchanged and
+still refuses anything but `PROPFIND` and `REPORT`, so CardDAV and every read keep their
+guarantee.
+
+**Occurrences.** The id names an occurrence by its start, as the read tools write it. The
+stored resource is searched for an override with that start, then a single event with it,
+then the series is expanded locally (`cal/expand.py`) to find it. Changing one occurrence
+edits its override, or adds one (a copy of the master without `RRULE`, `RDATE` and `EXDATE`,
+with `RECURRENCE-ID` the original start in the master's value type and zone); deleting one
+adds an `EXDATE` to the master and drops its override. A single event is deleted with
+`DELETE`. A whole series is never changed or deleted in one call. Every other component and
+property of the resource (other overrides, `VTIMEZONE`s, `X-APPLE-*` properties, alerts not
+being replaced) is kept; the changed component gets a higher `SEQUENCE` and new
+`LAST-MODIFIED`. New and moved times are written with `TZID` and a matching `VTIMEZONE`, never
+as floating times; alerts are written only as display alerts.
+
+**Why attendees are refused.** iCloud schedules on the server and ignores
+`SCHEDULE-AGENT=CLIENT` (live check, 2026-10-13): any event saved with an attendee makes it
+send invitations, updates or cancellations. So pv-icloud never writes `ORGANIZER` or
+`ATTENDEE`, and refuses, after the fresh read and before any write, a resource any of whose
+events has an organiser or attendee other than the account itself. iCloud stores the
+account's own address as its principal path with the address in `EMAIL=`; such a value, a
+`mailto:` address from the principal's `calendar-user-address-set` (read once per account),
+or the principal path itself count as the account. Anything else, a principal path without a
+known `EMAIL=` included, counts as someone else. The read tools take `email` from `EMAIL=` in
+the same way. The fake CalDAV server records every write that would make iCloud email
+someone, and the tests require that record to stay empty.
+
+`tests/test_repo_policy.py` checks that `PUT` and `DELETE` are used as HTTP methods only in
+`cal/caldav_write.py`, that no source sends `MKCALENDAR`, `MKCOL`, `PROPPATCH`, `MOVE`,
+`COPY`, `ACL`, `LOCK` or `POST`, and that nothing under `cal/` writes `ORGANIZER` or
+`ATTENDEE`. The fake server refuses unconditional writes and writes to collections,
+subscribed or read-only calendars.
 
 ## Contacts
 
