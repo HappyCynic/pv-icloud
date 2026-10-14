@@ -62,7 +62,7 @@ Each group ends with its tests passing.
 
 ## 5. vCard composition and lossless editing
 
-- [ ] 5.1 Write tests in a new `tests/test_contacts_compose.py` for
+- [x] 5.1 Write tests in a new `tests/test_contacts_compose.py` for
   `src/pv_icloud/contacts/compose.py`: new cards (vCard 3.0, `PRODID`, `N`, `FN`, `UID`,
   `REV`, `X-ABShowAs:COMPANY` for an organization-only card, CRLF, folding at 75 octets,
   escaping of `,`, `;`, `\` and line breaks); for every row of the label table in design
@@ -84,7 +84,7 @@ Each group ends with its tests passing.
   4.0 and unsplittable text; group card member lines added and removed with every other line
   (hidden members included) unchanged; no `PHOTO` ever written; every input limit in the
   `contacts-write-tools` spec refused with the field named.
-- [ ] 5.2 Implement `src/pv_icloud/contacts/compose.py` (SPDX header); verify 5.1 passes.
+- [x] 5.2 Implement `src/pv_icloud/contacts/compose.py` (SPDX header); verify 5.1 passes.
 
 ## 6. Write path
 
