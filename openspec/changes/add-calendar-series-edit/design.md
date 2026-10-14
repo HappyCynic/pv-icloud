@@ -29,6 +29,20 @@ unrelated to either `UID`. Apple treats every resource with the same value as on
 exceptions stay as stored; the new part copies the master's properties (`LOCATION`,
 `X-APPLE-STRUCTURED-LOCATION`, `TRANSP`). Apple did not bump `SEQUENCE` on the cut.
 
+Read-only checks of real iCloud data (maintainer, 2026-10-14, issue #26):
+
+- 28 split series: 21 with 2 parts, 3 with 3, none with more. None uses `COUNT` or floating
+  times.
+- All-day split masters (2 of 2) have `UNTIL` as a `DATE`, the day before the split.
+- 17 overrides in real split series carry the recurrence-set `RELATED-TO`, but Apple did not
+  add it to existing overrides in the test split.
+- iCloud does not support property filters in `calendar-query`: a `prop-filter` on
+  `RELATED-TO` (and, as a control, on `SUMMARY`) returns 207 with no matches; a
+  `collation="i;octet"` returns 412; a `param-filter` returns 500; a request for partial
+  `calendar-data` is ignored and full events come back.
+- An open-ended time-range listing from today is 0.5 MB for the largest of 6 calendars; one
+  from a year ago is 4.9 MB.
+
 ADR-0005 decision 3 limits every call to one event and leaves "whole-series edit modes" out
 of scope; `calendar_event_update`'s description says it never changes a whole series. The
 maintainer has accepted the approach below and lands ADR-0007 before implementation; see
@@ -36,10 +50,11 @@ decision 11. CLAUDE.md's method list for calendar writes does not change: every 
 still one conditional `PUT` or `DELETE` of one event resource.
 
 Modules touched: `cal/compose` (series edits, splits, recurrence sets), `cal/caldav` (one new
-read: the parts of a recurrence set), `cal/service` (`update_series`), `server` (the tool and
-instructions). `cal/caldav_write` and `cal/expand` are reused unchanged. No new paging: the
-result is a single object; a recurrence set is capped at 10 parts and `unmatched` is bounded
-by the stored resources (decision 8).
+read: an unexpanded time-range listing of a calendar, to find the parts of a recurrence set),
+`cal/service` (`update_series`), `server` (the tool and instructions). `cal/caldav_write` and
+`cal/expand` are reused unchanged. No new paging: the result is a single object; a recurrence
+set is capped at 10 parts, the search for earlier parts reaches back 366 days (decision 6),
+and `unmatched` is bounded by the stored resources (decision 8).
 
 ## Goals / Non-Goals
 
@@ -152,10 +167,11 @@ of the series that contains the date, in Apple's format (Context):
   the day before `effective`, in the series' zone, written in UTC (for example
   `UNTIL=20261103T055959Z` for an America/Chicago series and `effective` 2026-11-03). A
   `COUNT` is replaced by that `UNTIL` (RFC 5545 forbids both; the occurrences before the date
-  are the same either way, since `EXDATE`s do not change what `COUNT` counts). For a
-  floating series the `UNTIL` is that local time without a zone, and for an all-day series it
-  is the date of the day before, as RFC 5545 requires the value type of `DTSTART` (Apple's
-  form for these two cases is in the live check, task 8.1). `EXDATE` values and overrides on
+  are the same either way, since `EXDATE`s do not change what `COUNT` counts). For an all-day
+  series the `UNTIL` is a `DATE`, the day before `effective` (Apple's form in real data). For a
+  floating series it is that local time without a zone, as RFC 5545 requires the value type
+  of `DTSTART` (no real split series uses `COUNT` or floating times; the maintainer accepted
+  both forms). `EXDATE` values and overrides on
   or after the date are removed from it. Everything else, earlier overrides, `VTIMEZONE`s and
   `X-APPLE-*` properties included, is kept as stored; the master gets a higher `SEQUENCE`
   (Apple does not bump it; the maintainer accepted bumping) and a new `LAST-MODIFIED`.
@@ -170,13 +186,20 @@ of the series that contains the date, in Apple's format (Context):
 - **Both parts carry the recurrence set.** If the old master has
   `RELATED-TO;RELTYPE=X-CALENDARSERVER-RECURRENCE-SET`, its value is reused; otherwise a new
   random UUID, unrelated to either `UID`, is generated and added to the old master. The new
-  master gets the same value. (Whether Apple also puts it on overrides is in the live check;
-  until then it is written on masters only and left on overrides as stored.)
-- `effective` must have at least one original occurrence before it in the set and one on or
-  after it; otherwise the call fails (`no occurrence before <date>; use replace_all or
-  update_all`, or `the series has no occurrence on or after <date>`). When `effective` is on
-  or before the first occurrence of a later part of a recurrence set, that part is not split
-  but changed in place (decision 7).
+  master gets the same value.
+- **Overrides follow Apple's real data.** Every override pv-icloud creates or re-keys (the
+  kept overrides in the new resource, and overrides re-keyed in place in an `update_*` mode,
+  decision 5) carries the master's recurrence-set value, the way a new override is a copy of
+  the master: the property is set to the master's value, or removed when the master has
+  none. Overrides pv-icloud does not create or re-key, such as the cut part's earlier ones,
+  are left as stored.
+- `effective` must have at least one original occurrence on or after it in the set;
+  otherwise the call fails (`the series has no occurrence on or after <date>`). When
+  `effective` is on or before the first occurrence of the part found first from it
+  (decision 6), there is nothing to cut: a part that carries a recurrence-set value is
+  changed in place, as a later part of a set (decision 7, confirmed by the maintainer); a
+  series without one fails with `no occurrence before <date>; use replace_all or
+  update_all`.
 - **Occurrence ids from the date change**: an id names the calendar, the resource and the
   start, and the occurrences on or after the date now live in the new resource. The description says so and the result
   carries `ids_changed_from` (decision 8).
@@ -188,7 +211,8 @@ The `_all` modes change the one resource in place, with one `PUT` with `If-Match
 An exception in range matches when the new series has exactly one occurrence on the same day
 as the exception's original start. It is then re-keyed to that occurrence: an `EXDATE`
 becomes that occurrence's start, and an override's `RECURRENCE-ID` becomes it (same value
-type and `TZID` as the new `DTSTART`). With an unchanged pattern and time every exception
+type and `TZID` as the new `DTSTART`), and a re-keyed override takes the master's
+recurrence-set value (decision 4). With an unchanged pattern and time every exception
 matches as it is; with only a new time of day every exception matches and is re-keyed; with
 a new weekday set, exceptions on days that drop out do not match.
 
@@ -220,20 +244,43 @@ definition.
 
 ### 6. Finding the recurrence set
 
-A series whose master has no `RELATED-TO;RELTYPE=X-CALENDARSERVER-RECURRENCE-SET` is a set of
-one part, and nothing more is read. Otherwise the set's other parts are found in the series'
-calendar with one `calendar-query` `REPORT` (`VEVENT` with a `prop-filter` on `RELATED-TO`
-and a `text-match` of the value, returning ETags and data); each part found is checked to
-carry exactly that value with `RELTYPE=X-CALENDARSERVER-RECURRENCE-SET` on its master. If
-iCloud does not support that filter (the maintainer checks this live before implementation,
-task 1.1), the fallback is one `calendar-query` of the calendar's `VEVENT`s without a time
-range, filtered locally. Both are `REPORT`s through the read-only DAV base; `cal/caldav.py`
-gets one new read method for this. Parts in other calendars are not looked for.
+The series' own resource (the *named part*, the one the id points into) is read first, as
+today, with a single-href `calendar-multiget`. A series whose master has no
+`RELATED-TO;RELTYPE=X-CALENDARSERVER-RECURRENCE-SET` is a set of one part, and nothing more
+is read.
 
-A set of more than **10 parts** is refused, before any write, with `this series has more
-than 10 parts; change it in Calendar`. Parts are ordered by their first occurrence. Every
-part is then re-read with a single-href `calendar-multiget` (data and ETag), and the
-people, writable-calendar and series-shape checks run on every part before any write.
+Otherwise the other parts are found by listing the series' calendar by time, because iCloud
+does not support property filters (Context). Each listing is one `calendar-query` `REPORT`
+for `VEVENT`s with a `time-range`, asking for `getetag` and unexpanded `calendar-data`; the
+server then keeps, locally, the resources whose master carries
+`RELATED-TO;RELTYPE=X-CALENDARSERVER-RECURRENCE-SET` with exactly the named part's value.
+The listings never carry a `prop-filter`, a `param-filter` or a `collation` (iCloud answers
+them wrongly, with 207 and no matches, 412 or 500). Two windows:
+
+- **Later parts, every mode:** `<c:time-range start="…"/>` with no end, starting at the
+  named part's last occurrence in the `_all` modes, or at `effective` in the `_from` modes. A
+  time-range matches a recurring resource when any of its occurrences falls in it, so in the
+  `_from` modes this also finds the part that contains `effective` when the id names an
+  earlier part. In the `_all` modes, when the named part has no last occurrence (it is
+  endless, so no part can follow it), this listing is skipped.
+- **Earlier parts, `_all` modes only:** a range from 366 days before today to the named
+  part's first occurrence, skipped when that occurrence is before the range's start. A part
+  whose occurrences all end before the window is not found and not changed. The result gives
+  the window's start as `parts.searched_from`, and the tool description says that parts of a
+  series that ended more than a year ago are not changed.
+
+The maintainer's measurements put an open-ended listing from today at 0.5 MB for the largest
+of six calendars and a listing from a year back at 4.9 MB; the earlier-parts listing runs
+only for `_all` modes on a series that carries a recurrence set, and the `_from` modes never
+look back. Both are `REPORT`s through the read-only DAV base; `cal/caldav.py` gets one new
+read method for them (an unexpanded variant of `events`, with an optional end). Parts in
+other calendars are not looked for.
+
+The `getetag` and data from a listing are that part's fresh read (a read of that resource in
+the same call, as ADR-0005 requires for `If-Match`); no further request reads it. A set of
+more than **10 parts** found is refused, before any write, with `this series has more than
+10 parts; change it in Calendar`. Parts are ordered by their first occurrence, and the
+people, writable-calendar and series-shape checks run on every part found before any write.
 
 ### 7. Recurrence sets with several parts
 
@@ -248,13 +295,16 @@ limits (from the maintainer's answer on #26):
   part are refused before any write: `this series was split; change it from a date
   (replace_from / update_from)`.
 - **`_from` modes** change the part that contains `effective` as in decision 4 (split it, or
-  change it in place when `effective` is on or before its first occurrence and it is not the
-  set's first part), and treat every later part like `update_all`: field edits are applied
-  to it, each with its own `PUT` and `If-Match`. When there are later parts, a pattern field
-  is refused (`this series was split on <date>; change its pattern from that date or
-  later`), and so is `replace_from` (see Open Questions), because a later part's own pattern
-  and exceptions cannot be reconciled with a new one in one call.
-- Parts before the one containing `effective` are not changed.
+  change it in place when `effective` is on or before its first occurrence and it carries a
+  recurrence-set value), and treat every later part like `update_all`: field edits are
+  applied to it, each with its own `PUT` and `If-Match`. When there are later parts, a
+  pattern field is refused (`this series was split on <date>; change its pattern from that
+  date or later`), and so is `replace_from` (confirmed by the maintainer), because a later
+  part's own pattern and exceptions cannot be reconciled with a new one in one call.
+- Parts before the one containing `effective` are not looked for and not changed.
+- In the `_all` modes, the refusals above apply when more than one part is found by the two
+  listings of decision 6; parts that ended before the earlier-parts window are not found, so
+  they neither cause a refusal nor are changed.
 
 Writes go part by part in order of first occurrence, the split (decision 9) first. If a
 later part's `PUT` fails, nothing more is sent and the call fails with an error that names
@@ -276,7 +326,7 @@ split's rollback.
   "unmatched": [{"kind": "changed", "original_start": "...", "start": "...", "end": "...",
                  "title": "..."}, {"kind": "deleted", "original_start": "..."}],
   "requires_drop_unmatched": false,    # preview only
-  "parts": {"total": 2, "changed": 2},
+  "parts": {"found": 2, "changed": 2, "searched_from": "2025-10-14"},
   "previous": {"uid": "...", "last_start": "..."},                      # split only
   "ids_changed_from": "2027-01-11"                                       # split only
 }
@@ -289,7 +339,11 @@ removed, up to the last one, or, for an endless series, through 366 days after t
 changed occurrence, in which case `occurrences_through` is that last day counted.
 `exceptions` counts over every changed part. `unmatched` is not capped: its length is bounded
 by the exceptions stored in at most 10 resources, and its count is also in
-`exceptions.unmatched`. `parts` gives the set's size and how many parts the call changes.
+`exceptions.unmatched`. `parts` gives how many parts of the set were found (1 for a series
+without a recurrence set), how many the call changes, and `searched_from`: in the `_all`
+modes for a series with a recurrence set, the start of the earlier-parts window (decision 6;
+parts that ended before it were not looked for), even when that listing was skipped;
+otherwise null (in the `_from` modes nothing before `effective` is looked for).
 After a split, `ids_changed_from` is the effective date: occurrence ids on or after it have
 changed and must be read again. Times in the result are in the event's zone, as everywhere
 else. Titles in `unmatched` are event content and the result keeps the read tools'
@@ -297,8 +351,9 @@ else. Titles in `unmatched` are event content and the result keeps the read tool
 
 ### 9. Order of writes and rollback
 
-1. Fresh reads: the series' resource, the set's other parts if any (decision 6), each with a
-   single-href `calendar-multiget` (data and ETag); writable-calendar, people and
+1. Fresh reads: the series' resource with a single-href `calendar-multiget` (data and ETag),
+   then, for a series with a recurrence set, the time-range listings of decision 6 (data and
+   ETag of every other part); writable-calendar, people and
    series-shape checks on every part; part-count cap; unmatched check (decision 5); every
    resource computed. Nothing is sent if any check fails.
 2. With `preview`, return the result here.
@@ -350,10 +405,14 @@ it decides:
    new event resource and a `PUT` with `If-Match` of the series' resource, plus, only to undo
    the first after the second was refused, a `DELETE` with `If-Match` of that new resource.
    Splits are stored in Apple's format (`UNTIL` and
-   `RELATED-TO;RELTYPE=X-CALENDARSERVER-RECURRENCE-SET`).
+   `RELATED-TO;RELTYPE=X-CALENDARSERVER-RECURRENCE-SET`, on both masters and on every override
+   pv-icloud creates or re-keys).
 3. Resources sharing a recurrence set are one series: a series edit may send one `PUT` with
    `If-Match` to each of up to 10 parts in the same calendar, field edits only across parts,
-   no rollback of earlier parts on a later failure, which is reported part by part.
+   no rollback of earlier parts on a later failure, which is reported part by part. Parts are
+   found with time-range `calendar-query` listings of that calendar (open-ended from the
+   named part or `effective`; back to 366 days before today for earlier parts in the `_all`
+   modes), matched locally, never with a `prop-filter`, `param-filter` or `collation`.
 4. Everything else in ADR-0005 applies unchanged: one event resource per request, its method
    list and preconditions, writable and unprotected calendars, no attendees and no events
    involving anyone else, `Schedule-Reply: F`, 412 reported and never retried, one
@@ -370,7 +429,8 @@ four values; `drop_unmatched` and `preview` booleans. The rate-limit check runs 
 every write tool. The instructions for a token with `calendar_write` name the new tool and
 say it changes a whole series or a series from a date, that it can discard deleted and
 changed occurrences, that it should be previewed and confirmed with the user, and that
-occurrence ids from a split date change.
+occurrence ids from a split date change. The tool description also says that, on a series
+split in Calendar, parts that ended more than a year ago are not found or changed.
 
 ## Risks / Trade-offs
 
@@ -385,8 +445,13 @@ occurrence ids from a split date change.
   series' id, never retried.
 - **Partial failure across parts** → only field edits are applied across parts, so a
   half-applied call leaves each part a valid series; the error names the parts changed.
-- **Finding parts may need a full calendar listing** if iCloud lacks the `RELATED-TO` filter →
-  one `REPORT`, read-only, only for series that carry a recurrence set; checked live first.
+- **Finding parts needs calendar listings** because iCloud has no property filter (up to
+  about 5 MB for a year-back listing of a large calendar) → only for series that carry a
+  recurrence set; the `_from` modes and the later-parts search only list forward from a
+  date; the year-back listing runs only in the `_all` modes.
+- **Parts that ended more than a year ago are not found** by `update_all` → they are left as
+  they are, which is harmless for field edits; the result's `parts.searched_from` and the
+  description say so.
 - **Rules beyond `calendar_event_create`'s subset** → kept when `recurrence` is not given,
   replaced when it is; matching uses the rule as stored via `cal/expand.py`.
 
@@ -397,15 +462,21 @@ tool; stored series written by it are ordinary iCalendar data in Apple's format.
 
 ## Open Questions
 
-Answered on #26 (2026-10-14): ADR-0007 and the split are accepted; Apple's split format;
-preview counts against the write limit; unmatched changed occurrences need `drop_unmatched`;
-the override propagation rule; recurrence sets. Remaining:
+Answered on #26 (2026-10-14): ADR-0007 and the split are accepted; Apple's split format,
+including all-day `UNTIL` and the recurrence set on overrides; preview counts against the
+write limit; unmatched changed occurrences need `drop_unmatched`; the override propagation
+rule; recurrence sets, the 10-part cap, `replace_from` refused with later parts, a later part
+changed in place; finding parts by time-range listings without property filters.
+Remaining:
 
-1. **`replace_from` on a set with later parts**: the proposal refuses it, like `replace_all`
-   on a split set. Should it instead apply the field edits to later parts and discard their
-   exceptions?
-2. **Live check, before implementation (task 1.1)**: does iCloud support a `calendar-query`
-   `prop-filter` on `RELATED-TO`?
-3. **Live check, before merge (task 8.1)**: Apple's `UNTIL` for all-day and floating series,
-   whether Apple writes the recurrence-set `RELATED-TO` on overrides too, and whether Apple
-   replaces a `COUNT` with `UNTIL` on a split.
+1. **Earlier-parts listing for `replace_all`.** The maintainer's answer runs the year-back
+   listing for `update_all` only. `replace_all` must be refused on a split series, which
+   needs the earlier parts when the id names a later part, so this design runs it in both
+   `_all` modes (decision 6). The alternative is to refuse `replace_all` whenever the master
+   carries a recurrence-set value, without listing; that also refuses the rare series whose
+   other parts were all deleted.
+2. **`effective` before a set's first part.** Since the `_from` modes never look before
+   `effective`, a part that carries a recurrence-set value and starts on or after `effective`
+   is changed in place even when it is the set's first part (decision 4). This gives the same
+   outcome as the `_all` mode on that part and those after it; only a series without a
+   recurrence set fails with `no occurrence before <date>`.

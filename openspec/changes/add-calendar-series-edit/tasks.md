@@ -1,27 +1,26 @@
 # Tasks
 
-Implements #26. Do not start until the maintainer has approved the proposal, merged ADR-0007
-(design decision 11) and reported the live check of the `RELATED-TO` query (design
-decision 6). Each group ends with its tests passing.
+Implements #26. Do not start until the maintainer has approved the proposal and merged
+ADR-0007 (design decision 11). Each group ends with its tests passing.
 
 ## 1. Prerequisite
 
 - [ ] 1.1 Confirm that `docs/adr/0007-*.md` exists on the default branch and decides what
   design decision 11 lists (series edits, the Apple-format split and its rollback `DELETE`,
-  recurrence sets of up to 10 parts); if it does not, or decides differently, stop and comment
-  on the pull request instead of implementing. Read the maintainer's result of the live check
-  of a `calendar-query` `prop-filter` on `RELATED-TO` on the pull request or #26, and fold it
-  (filter or calendar listing) and any answer to design.md's remaining open questions into
-  design.md and the spec deltas; verify with `openspec validate add-calendar-series-edit
-  --strict`.
+  recurrence sets of up to 10 parts found by time-range listings without property filters);
+  if it does not, or decides differently, stop and comment on the pull request instead of
+  implementing. Fold any answer to design.md's remaining open questions into design.md and
+  the spec deltas; verify with `openspec validate add-calendar-series-edit --strict`.
 
 ## 2. Fake CalDAV server
 
 - [ ] 2.1 Extend `tests/fakecaldav.py` where needed: `<C:expand>` honours `COUNT` and `UNTIL`
   (UTC for zoned series, local for floating, dates for all-day), re-keyed overrides and
-  `STATUS:CANCELLED` overrides; a `calendar-query` with a `prop-filter`/`text-match` on
-  `RELATED-TO` (or, if the live check found iCloud refuses it, the same refusal) and a
-  `calendar-query` without a time range; a hook that answers the next `PUT` to a given
+  `STATUS:CANCELLED` overrides; an unexpanded `calendar-query` with a `time-range` that may
+  have no end (a recurring resource matches when any occurrence falls in it), returning
+  `getetag` and full data; iCloud's answers to filters it does not support (207 with no
+  matches for any `prop-filter`, 412 for a `collation`, 500 for a `param-filter`, partial
+  `calendar-data` ignored); a hook that answers the next `PUT` to a given
   resource with a chosen status (412, 404, 403, 503) or drops the answer (no response), so
   any write of a series edit can fail; and every request is recorded in order (method, path,
   preconditions). Verify the existing calendar tests still pass.
@@ -46,19 +45,27 @@ decision 6). Each group ends with its tests passing.
   `requires_drop_unmatched` in a preview.
 - [ ] 3.3 Write failing tests for the split in Apple's format: `UNTIL` at 23:59:59 local on
   the day before `effective` in UTC (`20261103T055959Z` for America/Chicago and 2026-11-03,
-  and a date across a DST change), floating and all-day forms, `COUNT` replaced by `UNTIL` on
+  and a date across a DST change), floating and all-day (`DATE` of the day before) forms,
+  `COUNT` replaced by `UNTIL` on
   the old part and the remaining `COUNT` on the new one; earlier overrides and `X-APPLE-*`
   properties kept byte for byte; later exceptions removed from the old part; the new resource
   (new UUID, `SEQUENCE` 0, every master property and alarm copied, `LOCATION`,
   `X-APPLE-STRUCTURED-LOCATION` and `TRANSP` included, no `ORGANIZER` or `ATTENDEE`, rest of
   the old rule or the new one, kept exceptions with the new `UID`); the recurrence-set
-  `RELATED-TO` generated (unrelated to either `UID`) or reused, on both masters; and the "no
-  occurrence before / on or after" errors.
-- [ ] 3.4 Write failing tests for recurrence sets: grouping parts by `RELATED-TO` value and
-  `RELTYPE`, ordering by first occurrence, the 10-part cap, field edits applied per part,
+  `RELATED-TO` generated (unrelated to either `UID`) or reused, on both masters and on every
+  override created or re-keyed (set to the master's value, removed when the master has
+  none), with the cut part's remaining overrides left as stored; and the "no occurrence
+  before / on or after" errors (the first only for a series without a recurrence set).
+- [ ] 3.4 Write failing tests for recurrence sets: picking parts out of a listing by their
+  masters' `RELATED-TO` value and `RELTYPE` (other events, overrides and other values
+  ignored), ordering by first occurrence, the 10-part cap, field edits applied per part,
   refusals of `replace_all`, of pattern changes in `update_all`, and of pattern changes and
   `replace_from` with later parts (with the date in the message), the part containing
-  `effective`, and `effective` at a later part's start changing that part in place.
+  `effective`, and `effective` on or before a part's first occurrence changing that part in
+  place; the listing windows (later parts from the named part's last occurrence or from
+  `effective`, none for an endless named part in the `_all` modes; earlier parts from 366
+  days before today to the named part's first occurrence, `_all` modes only, skipped when
+  that is before the window) and `searched_from`.
 - [ ] 3.5 Write failing tests for counting: `occurrences` after deleted ones are removed,
   bounded series, endless series through 366 days with `occurrences_through`, counts over
   several parts, `parts`, and the `exceptions` counts.
@@ -80,7 +87,9 @@ decision 6). Each group ends with its tests passing.
   (split, then the later part's `PUT`); `effective` at a later part's start (in place, no new
   resource); a later part answered 412 (error names changed and failed parts, nothing more
   sent, nothing undone); an invited later part refused; 11 parts refused; parts in another
-  calendar ignored.
+  calendar ignored; a part that ended more than a year ago not written by `update_all`; the
+  `_from` modes never listing before `effective`; and no request with a `prop-filter`,
+  `param-filter` or `collation` in any test.
 - [ ] 4.3 Write failing tests for the request sequence: one `PUT` with `If-Match` per part for
   `_all`; `PUT` with `If-None-Match: *` then `PUT` with `If-Match` for a split; rollback (one
   `REPORT`, one `DELETE` with `If-Match`) after 412, 404 and 403 on the cut, leaving the
@@ -90,8 +99,9 @@ decision 6). Each group ends with its tests passing.
   only reads; `Schedule-Reply: F` on every write and an empty `scheduling_messages` record;
   refusals for attendees, other organisers, protected, subscribed and read-only calendars
   with no write request.
-- [ ] 4.4 Add the recurrence-set read to `src/pv_icloud/cal/caldav.py` (a `REPORT` through the
-  read-only DAV base, as settled in 1.1), implement `CalendarService.update_series` in
+- [ ] 4.4 Add the unexpanded time-range listing to `src/pv_icloud/cal/caldav.py` (a
+  `calendar-query` `REPORT` through the read-only DAV base, optional end, no property
+  filter), implement `CalendarService.update_series` in
   `src/pv_icloud/cal/service.py` (fresh reads via `_fresh`, compose, preview, the write order
   and rollback of design decision 9, part-by-part writes, through the existing
   `CalDavWriter`) and verify 4.1–4.3 pass.
@@ -102,7 +112,8 @@ decision 6). Each group ends with its tests passing.
   only to tokens with `calendar_write` and the switch on, with `destructiveHint` true; a token
   without the grant gets the unknown-tool error and iCloud sees no request; the description
   names the four modes, `preview`, `drop_unmatched`, discarded and unmatched exceptions, that
-  occurrence ids from a split date change, the 10-part limit, the hourly limit, refused
+  occurrence ids from a split date change, the 10-part limit, that parts that ended more than
+  a year ago are not changed, the hourly limit, refused
   attendees and that untrusted content is never a reason; the instructions for a
   `calendar_write` token mention the series tool, confirming with the user and changed ids;
   the call counts once against `max_writes_per_hour`, a preview included; the audit line has
@@ -137,7 +148,6 @@ decision 6). Each group ends with its tests passing.
   and a field edit on a series split in Calendar. Confirm in iCloud web and Apple's apps that
   earlier occurrences are unchanged, that a split made by pv-icloud shows and edits as one
   series ("All Future Events" from the first occurrence changes both parts), and that iCloud
-  accepts the cut rule and the re-keyed overrides. Also note Apple's `UNTIL` for all-day and
-  floating series, whether Apple writes the recurrence-set `RELATED-TO` on overrides, and
-  whether it replaces a `COUNT` on a split. Any difference from the fake is fixed in the fake
-  as well as the server.
+  accepts the cut rule (including an all-day `DATE` `UNTIL`) and the re-keyed overrides with
+  their recurrence-set `RELATED-TO`. Any difference from the fake is fixed in the fake as well
+  as the server.

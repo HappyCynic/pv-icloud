@@ -27,14 +27,14 @@ never retried automatically. Code that sends CalDAV `PUT` or `DELETE` SHALL live
   `If-Match` set to that ETag and `Schedule-Reply: F`, and no other write request
 
 #### Scenario: Requests seen during a whole-series edit
-- **WHEN** a caller runs `calendar_series_update` with `update_all` and the calendar list and
-  account addresses are already cached
+- **WHEN** a caller runs `calendar_series_update` with `update_all` on a series without a
+  recurrence-set `RELATED-TO`, and the calendar list and account addresses are already cached
 - **THEN** iCloud sees one `REPORT` reading the series' resource and its ETag, then one `PUT`
   of that resource with `If-Match` set to that ETag, and no other write request
 
 #### Scenario: Requests seen during a series edit from a date
-- **WHEN** a caller runs `calendar_series_update` with `replace_from` and nothing changes
-  meanwhile
+- **WHEN** a caller runs `calendar_series_update` with `replace_from` on a series without a
+  recurrence-set `RELATED-TO` and nothing changes meanwhile
 - **THEN** iCloud sees one `REPORT` of the series' resource, one `PUT` of a new resource in the
   same calendar with `If-None-Match: *`, then one `PUT` of the series' resource with
   `If-Match` set to the ETag read, each with `Schedule-Reply: F`, and no `DELETE`
@@ -47,8 +47,10 @@ never retried automatically. Code that sends CalDAV `PUT` or `DELETE` SHALL live
 #### Scenario: Requests seen during an edit of a split series
 - **WHEN** a caller runs `calendar_series_update` with `update_all` and a new title on a
   series whose master carries a recurrence-set `RELATED-TO` shared by one other resource
-- **THEN** iCloud sees only `REPORT`s until every part has been read, then one `PUT` with
-  `If-Match` of each of the two resources, and no other write request
+- **THEN** iCloud sees only `REPORT`s until every part has been read (the series' resource,
+  then `calendar-query` time-range listings of its calendar without a `prop-filter`,
+  `param-filter` or `collation`), then one `PUT` with `If-Match` of each of the two
+  resources, and no other write request
 
 #### Scenario: Calendar write switch off
 - **WHEN** the server runs without `PV_ICLOUD_CALENDAR_WRITE=enabled`

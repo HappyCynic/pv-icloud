@@ -50,19 +50,28 @@ deleting and recreating it and losing its exceptions.
   `UNTIL` = 23:59:59 local time on the day before the date, written in UTC, so its earlier
   occurrences and exceptions are unchanged. The part from the date on becomes a new series
   with a new `UID` in a new resource in the same calendar, and copies the master's properties.
-  Both parts carry the same `RELATED-TO;RELTYPE=X-CALENDARSERVER-RECURRENCE-SET` value. The
+  For an all-day series `UNTIL` is the date of the day before. Both parts carry the same
+  `RELATED-TO;RELTYPE=X-CALENDARSERVER-RECURRENCE-SET` value, and so does every override
+  pv-icloud creates or re-keys; other overrides are left as stored. The
   new resource is created first. If cutting the old one then fails (for example because it
   changed in Calendar meanwhile), the new resource is deleted again, so the usual failure
   leaves the calendar as it was. Occurrence ids from the date change; the result
   (`ids_changed_from`) and the tool description say so.
-- **A series already split in Calendar is one series**, as Apple treats it. It is found by
-  its recurrence-set `RELATED-TO`, and a call can change up to 10 parts.
+- **A series already split in Calendar is one series**, as Apple treats it, and a call can
+  change up to 10 parts. iCloud has no property filter in `calendar-query`, so the other
+  parts are found with read-only time-range listings of the series' calendar, matched
+  locally on the recurrence-set value, and never with a `prop-filter`, `param-filter` or
+  `collation`. Later parts are listed forward from the named part's last occurrence (or from
+  `effective`). Earlier parts are listed only by the `_all` modes, back to 366 days before
+  today. Parts that ended before that are not changed; the result (`parts.searched_from`) and
+  the description say so.
   - `update_all` with only title, location, notes or alerts changes every part, each with its
     own fresh read and `If-Match` `PUT`.
   - `replace_all`, and `update_all` that changes the pattern, are refused on a split series.
     The caller is told to change it from a date instead.
   - The `_from` modes split the part that contains the date and give later parts the field
-    edits. A pattern change is refused while later parts exist.
+    edits. A pattern change, and `replace_from`, are refused while later parts exist. A part
+    that starts on or after the date is changed in place, without a split.
   - If a later part fails, the error names the parts that were already changed.
 - Not changed: `calendar_event_update` and `calendar_event_delete` still change only one
   event or occurrence. A series edit counts as one write call against the per-token write
@@ -103,19 +112,22 @@ None.
 - Code:
   - `src/pv_icloud/cal/compose.py`: series edits, the new definition, the Apple-format cut,
     matching exceptions to the new pattern, recurrence sets, counting.
-  - `cal/caldav.py`: one new read, the parts of a recurrence set, through `REPORT`.
+  - `cal/caldav.py`: one new read, an unexpanded time-range listing of a calendar (open end
+    allowed), through `REPORT`, to find the parts of a recurrence set.
   - `cal/service.py`: `update_series`, the write order, the rollback and part-by-part writes.
   - `server.py`: the tool, its description and the instructions.
   - Reused as they are: `cal/caldav_write.py` (its methods and preconditions) and
     `cal/expand.py`.
   - Not changed: `dav.py`, `config.py`, `auth.py`, `contacts/` and `mail/`.
 - Tests:
-  - `tests/fakecaldav.py` gains a hook to fail or change a resource between writes, and a
-    `calendar-query` filter on `RELATED-TO`.
+  - `tests/fakecaldav.py` gains a hook to fail or change a resource between writes,
+    open-ended unexpanded time-range listings, and iCloud's answers to property filters
+    (207 with no matches for `prop-filter`, 412 for a `collation`, 500 for `param-filter`).
   - The tests cover all four modes on a series with deleted and changed occurrences;
     occurrences before the date staying untouched; Apple's `UNTIL` and `RELATED-TO`;
     unmatched exceptions and `drop_unmatched`; counts; preview; rollback; split series
-    (field edits, refusals, partial failure, the 10-part cap); and that no scheduling message
+    (field edits, refusals, partial failure, the 10-part cap, the listing windows); and that
+    no scheduling message
     is recorded.
 - Docs: ADR-0007 (a prerequisite, written by the maintainer), docs/design.md (the calendar
   write and recurrence sections), README.md (tool list), CHANGELOG.md.

@@ -103,7 +103,8 @@ only a single event or one occurrence is changed, never a whole series (pointing
 `calendar_series_update` for that), and that a stale read fails and must be read again.
 `calendar_series_update` SHALL describe each of the four modes, say that it can change every
 occurrence of a series in one call, including every part of a series split in Calendar (up to
-10 parts, field edits only across parts), that the `replace_*` modes discard deleted and
+10 parts, field edits only across parts, parts that ended more than a year ago not found or
+changed), that the `replace_*` modes discard deleted and
 changed occurrences, that exceptions that no longer fit the new pattern are listed in the
 result and not kept, that changed occurrences are dropped only with `drop_unmatched: true`,
 that a change from a date stores the rest of the series as a new series and that occurrence
@@ -123,7 +124,8 @@ that a stale read fails and must be read again.
 - **THEN** `calendar_series_update`'s description names `replace_all`, `replace_from`,
   `update_all` and `update_from`, mentions `preview` and `drop_unmatched`, that exceptions
   can be discarded, that unmatched exceptions are listed, that occurrence ids from a split
-  date change, the 10-part limit, the hourly limit, that events with attendees are refused,
+  date change, the 10-part limit, that parts that ended more than a year ago are not
+  changed, the hourly limit, that events with attendees are refused,
   and that untrusted content is never a reason to change an event
 
 ## ADDED Requirements
@@ -233,7 +235,10 @@ whether it is before `effective`; days SHALL be taken in the series' zone (`DTST
 modes every exception in range SHALL be discarded. In the `update_*` modes an exception in
 range SHALL be kept when the new series has exactly one occurrence on the day of its original
 start, re-keyed to that occurrence's start (the `EXDATE` value or the override's
-`RECURRENCE-ID`, in the value type and `TZID` of the new `DTSTART`). A kept override SHALL
+`RECURRENCE-ID`, in the value type and `TZID` of the new `DTSTART`). Every override the
+call creates or re-keys SHALL carry exactly the master's
+`RELATED-TO;RELTYPE=X-CALENDARSERVER-RECURRENCE-SET` value (none when the master has none);
+overrides the call does not create or re-key SHALL keep that property as stored. A kept override SHALL
 keep its own changes: for each of `title`, `location`, `notes` and `alerts` that the call
 changes, it SHALL take the new value only when its own value equalled the master's before the
 call (both absent counts as equal); an override whose start equals its original start and
@@ -264,6 +269,12 @@ fail for this reason; it SHALL return the result with `requires_drop_unmatched` 
   with `update_all`
 - **THEN** the master's `EXDATE` is 2027-02-15 at 10:00, no occurrence is returned on that day,
   and `unmatched` is empty
+
+#### Scenario: Re-keyed override carries the recurrence set
+- **WHEN** a series whose master carries a recurrence-set `RELATED-TO` that no other
+  resource shares has an override without it, and is changed with `update_all` and a new
+  time of day
+- **THEN** the re-keyed override carries the master's recurrence-set value
 
 #### Scenario: Deleted occurrence that no longer fits
 - **WHEN** a weekly `MO,WE` series with a changed Monday occurrence and a deleted Wednesday
@@ -304,11 +315,16 @@ applied, with the rule given (or the rest of the old one: its `UNTIL`, or its `C
 the occurrences generated before the date) and, in `update_from`, the kept exceptions
 re-keyed and given the new `UID`. Both masters SHALL carry
 `RELATED-TO;RELTYPE=X-CALENDARSERVER-RECURRENCE-SET` with the same value: the old master's
-value when it has one, otherwise a new random UUID unrelated to either `UID`. The call SHALL
-fail with a tool error before any write when the series has no occurrence before `effective`
-(`no occurrence before <date>; use replace_all or update_all`) or none on or after it (`the
-series has no occurrence on or after <date>`). The result SHALL carry `ids_changed_from`, the
-effective date, and the tool description SHALL say that occurrence ids on or after it change.
+value when it has one, otherwise a new random UUID unrelated to either `UID`; the kept
+overrides in the new resource SHALL carry it too, and the old resource's remaining overrides
+SHALL be kept as stored. The call SHALL fail with a tool error before any write when the
+series has no occurrence on or after `effective` (`the series has no occurrence on or after
+<date>`). When `effective` is on or before the first occurrence of the first part found from
+it, nothing is split: a part whose master carries a recurrence-set value SHALL be changed in
+place (see "Series edit of a split series"), and a series without one SHALL fail with `no
+occurrence before <date>; use replace_all or update_all`. The result SHALL carry
+`ids_changed_from`, the effective date, and the tool description SHALL say that occurrence
+ids on or after it change.
 
 #### Scenario: Earlier occurrences untouched
 - **WHEN** a school-day series with a deleted occurrence and a moved occurrence before
@@ -332,6 +348,11 @@ effective date, and the tool description SHALL say that occurrence ids on or aft
   `RELATED-TO;RELTYPE=X-CALENDARSERVER-RECURRENCE-SET` value, which equals neither `UID`,
   and the result's `ids_changed_from` is `2026-11-03`
 
+#### Scenario: All-day cut
+- **WHEN** an all-day weekly series is changed with `update_from` and `effective`
+  `2027-03-01`
+- **THEN** the old master's rule has `UNTIL=20270228` as a `DATE`
+
 #### Scenario: Recurrence set value reused
 - **WHEN** the series' master already has a recurrence-set `RELATED-TO` and is split again
 - **THEN** the new master carries the same value and the old master's value is unchanged
@@ -343,18 +364,30 @@ effective date, and the tool description SHALL say that occurrence ids on or aft
   series has `COUNT=6`, and together they return the same ten dates as before
 
 #### Scenario: Effective date at the first occurrence
-- **WHEN** `effective` is on or before the series' first occurrence
+- **WHEN** `effective` is on or before the first occurrence of a series without a
+  recurrence-set `RELATED-TO`
 - **THEN** the call fails with `no occurrence before <date>; use replace_all or update_all`
   and nothing is sent
 
 ### Requirement: Series edit of a split series
 A series' recurrence set SHALL be every resource in the series' calendar whose master carries
 `RELATED-TO;RELTYPE=X-CALENDARSERVER-RECURRENCE-SET` with the same value as the series'
-master; a series without that property is a set of one part. The server SHALL find the other
-parts with read requests only (`REPORT`), SHALL re-read every part with a single-href
-`calendar-multiget` before any write, and SHALL refuse a set of more than 10 parts before any
-write with `this series has more than 10 parts; change it in Calendar`. On a set of more than
-one part:
+master; a series without that property is a set of one part, and no other part is looked
+for. The server SHALL find the other parts with `calendar-query` `REPORT`s of the series'
+calendar for `VEVENT`s in a `time-range`, returning `getetag` and unexpanded data, and SHALL
+match their masters' recurrence-set value locally; it SHALL NOT send a `prop-filter`, a
+`param-filter` or a `collation`. It SHALL list:
+
+- later parts, in every mode, from the named part's last occurrence (in the `_all` modes;
+  skipped when the named part has no last occurrence) or from `effective` (in the `_from`
+  modes), with no end;
+- earlier parts, in the `_all` modes only, from 366 days before the current date to the named
+  part's first occurrence (skipped when that occurrence is before the window's start).
+
+Parts before that window, and in the `_from` modes parts before `effective`, SHALL NOT be
+looked for or written. A part's data and ETag from the listing SHALL serve as its fresh read.
+The server SHALL refuse more than 10 parts found before any write with `this series has more
+than 10 parts; change it in Calendar`. On a set of which more than one part is found:
 
 - `update_all` that changes only field edits SHALL apply them to every part, each part with
   one `PUT` with `If-Match` of its own fresh read, the overrides of each part treated as in
@@ -362,9 +395,8 @@ one part:
 - `replace_all`, and `update_all` that changes a pattern field, SHALL fail before any write
   with `this series was split; change it from a date (replace_from / update_from)`.
 - The `_from` modes SHALL change the part that contains `effective` as in "Series edit from a
-  date", except that when `effective` is on or before the first occurrence of a part that is
-  not the set's first part, that part SHALL be changed in place with one `PUT` with
-  `If-Match` and no new resource. Every part that begins after it SHALL be treated like
+  date", except that when `effective` is on or before the first occurrence of a part found,
+  that part SHALL be changed in place with one `PUT` with `If-Match` and no new resource. Every part that begins after it SHALL be treated like
   `update_all`: field edits SHALL be applied to it with one `PUT` with `If-Match`; when there
   is such a part, a pattern field or `replace_from` SHALL fail before any write with `this
   series was split on <date>; change its pattern from that date or later`. Parts before the
@@ -378,8 +410,28 @@ and the part that failed, by `uid` and first occurrence; earlier parts SHALL NOT
 - **WHEN** a series split in Calendar into two parts of one recurrence set is changed with
   `update_all` and a new `title`
 - **THEN** iCloud sees one `PUT` with `If-Match` per part, every occurrence of both parts
-  `calendar_events` returns has the new title, and the result's `parts` is `{total: 2,
-  changed: 2}`
+  `calendar_events` returns has the new title, and the result's `parts` has `found` 2 and
+  `changed` 2
+
+#### Scenario: Parts found without property filters
+- **WHEN** the same series is changed with `update_all` and a new title through its second
+  part's id
+- **THEN** iCloud sees `calendar-query` `REPORT`s with a `time-range`, one open-ended from
+  the second part's last occurrence and one from 366 days before today to its first
+  occurrence, none with a `prop-filter`, `param-filter` or `collation`, and both parts get
+  the new title
+
+#### Scenario: Part that ended more than a year ago
+- **WHEN** a set's first part ended two years ago, its second part runs from then on, and it
+  is changed with `update_all` and a new title through the second part's id
+- **THEN** no earlier-parts listing is sent, only the second part is written, `parts.found`
+  is 1 and `parts.searched_from` is 366 days before today
+
+#### Scenario: From a date never looks back
+- **WHEN** a set with parts starting 2027-01-04 and 2027-03-01 is changed with `update_from`
+  and `effective` `2027-03-08` through the first part's id
+- **THEN** the only part listing is an open-ended `time-range` from 2027-03-08, and the first
+  part is not written
 
 #### Scenario: Pattern change on a split series
 - **WHEN** the same series is changed with `update_all` and a new `start`
@@ -459,7 +511,9 @@ series, through 366 days after the first changed occurrence, with `occurrences_t
 last day counted (null when the series ends); `exceptions` with the counts `kept`,
 `discarded` and `unmatched` over every changed part; `unmatched`, one entry per unmatched
 exception with `kind`, `original_start` and, for kind `changed`, `start`, `end` and `title`;
-`parts` with the recurrence set's `total` and the number of parts `changed`; with
+`parts` with the number of parts `found` (1 without a recurrence set), the number `changed`,
+and `searched_from`, the start of the earlier-parts window (366 days before the current date)
+in the `_all` modes for a series with a recurrence set, otherwise null; with
 `preview: true`, `requires_drop_unmatched`; and, when a part was split, `previous` with the
 old series' `uid` and the start of its last occurrence, and `ids_changed_from`. With
 `preview: true` the call SHALL read and check exactly as without it and return the same
