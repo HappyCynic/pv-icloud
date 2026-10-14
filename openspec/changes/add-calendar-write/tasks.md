@@ -120,7 +120,7 @@ approved the proposal. Each group ends with its tests passing.
 
 ## 8. Tools, permissions and audit
 
-- [ ] 8.1 Write tests in `tests/test_server.py`: with the switch off, `cal.caldav_write` and
+- [x] 8.1 Write tests in `tests/test_server.py`: with the switch off, `cal.caldav_write` and
   `cal.compose` are not imported and no calendar write tool is registered; a token without
   `calendar_write` gets the same `tools/list`, annotations and instructions as before
   (snapshot); a token with it sees the three tools with the annotations in the spec and no
@@ -133,7 +133,7 @@ approved the proposal. Each group ends with its tests passing.
   and subscribed calendars read-only, and the untrusted-content warning; audit lines have
   `write: true` and no title, notes, location, address, time, zone or calendar name,
   including for refused calls.
-- [ ] 8.2 Implement the three tools, conditional registration behind the switch, per-token
+- [x] 8.2 Implement the three tools, conditional registration behind the switch, per-token
   `tools/list` filtering and call-time checks, instructions, and calendar-write audit
   redaction in `src/pv_icloud/server.py`; verify 8.1 passes.
 

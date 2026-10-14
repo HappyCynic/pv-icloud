@@ -912,3 +912,316 @@ def test_calendar_and_contacts_stay_read_only_for_write_tokens(write_env):
         assert call_tool(client, token("agent"), tool)["isError"] is False, tool
     methods = {m for m, _ in runtime.caldav.requests} | {m for m, _ in runtime.carddav.requests}
     assert methods <= {"PROPFIND", "REPORT"}
+
+
+# --- calendar writes (ADR-0005) -----------------------------------------------------------
+
+CALENDAR_TOOLS = {"calendar_event_create", "calendar_event_update", "calendar_event_delete"}
+CALENDAR_TOKENS = {
+    "planner": {"calendar_write": True},
+    "fenced": {"calendar_write": True, "protected_calendars": ["alice home"]},
+    "both": {"calendar_write": True, "mail_write": ["draft"], "max_writes_per_hour": 2},
+    "scribe": {"mail_write": ["draft"]},
+}
+EVENT_ARGS = {
+    "calendar": "alice home",
+    "title": "Dentist",
+    "start": "2030-11-04T09:00",
+    "timezone": "Europe/London",
+    "notes": "Bring the forms",
+    "alerts": [30, 10],
+}
+EVENT_SECRETS = ("Dentist", "alice home", "2030-11-04", "Europe/London", "Bring the forms")
+
+
+@pytest.fixture
+def cal_env(tmp_path):
+    config = make_config(
+        tmp_path,
+        mail_write=True,
+        calendar_write=True,
+        alice_tokens=list(CALENDAR_TOKENS.items()),
+    )
+    yield from _app_env(config)
+
+
+def alice_calendar(runtime) -> FakeCalendar:
+    return runtime.caldav.accounts["alice@icloud.com"].calendars[0]
+
+
+def _assert_no_event_content(line: dict) -> None:
+    text = json.dumps(line)
+    for secret in EVENT_SECRETS:
+        assert secret not in text, secret
+
+
+def _imported_calendar_write_modules(tmp_path, enabled: bool) -> list[str]:
+    code = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from tests.conftest import make_config\n"
+        "from pv_icloud.server import Runtime, build_server\n"
+        f"cfg = make_config(Path({str(tmp_path)!r}), calendar_write={enabled})\n"
+        "build_server(Runtime(cfg, conn_factory=lambda: None, start_sync=False))\n"
+        "names = ('pv_icloud.cal.caldav_write', 'pv_icloud.cal.compose')\n"
+        "print(' '.join(n for n in names if n in sys.modules))\n"
+    )
+    root = Path(__file__).resolve().parent.parent
+    out = subprocess.run(
+        [sys.executable, "-c", code], cwd=root, capture_output=True, text=True, check=True
+    )
+    return out.stdout.split()
+
+
+def test_calendar_write_modules_are_imported_only_when_switched_on(tmp_path):
+    assert _imported_calendar_write_modules(tmp_path / "off", enabled=False) == []
+    assert _imported_calendar_write_modules(tmp_path / "on", enabled=True) == [
+        "pv_icloud.cal.caldav_write", "pv_icloud.cal.compose",
+    ]  # fmt: skip
+
+
+def test_no_calendar_write_tool_without_the_switch(write_env):
+    client, runtime = write_env  # mail writes on, calendar writes off
+    tools = rpc(client, "tools/list", token=token("agent")).json()["result"]["tools"]
+    assert not CALENDAR_TOOLS & {t["name"] for t in tools}
+    out = call_tool(client, token("agent"), "calendar_event_delete", {"id": "x"})
+    assert out["content"][0]["text"] == "Unknown tool: calendar_event_delete"
+
+
+def test_calendar_grant_lists_the_three_tools(cal_env):
+    client, runtime = cal_env
+    assert surface(client, TOKENS["alice"]) == json.loads(SNAPSHOT.read_text())
+    tools = rpc(client, "tools/list", token=token("planner")).json()["result"]["tools"]
+    assert {t["name"] for t in tools} == READ_TOOLS | CALENDAR_TOOLS
+    snapshot = json.loads(SNAPSHOT.read_text())["tools"]
+    assert [t for t in tools if t["name"] in READ_TOOLS] == snapshot
+    by_name = {t["name"]: t for t in tools}
+    for name, destructive in (
+        ("calendar_event_create", False),
+        ("calendar_event_update", True),
+        ("calendar_event_delete", True),
+    ):
+        assert by_name[name]["annotations"] == {
+            "readOnlyHint": False,
+            "destructiveHint": destructive,
+            "idempotentHint": False,
+            "openWorldHint": True,
+        }, name
+        schema = by_name[name]["inputSchema"]
+        assert "attendees" not in schema["properties"], name
+        assert schema.get("additionalProperties") is False, name
+    assert sorted(by_name["calendar_event_create"]["inputSchema"]["required"]) == [
+        "calendar", "start", "title",
+    ]  # fmt: skip
+    assert by_name["calendar_event_delete"]["inputSchema"]["required"] == ["id"]
+    both = rpc(client, "tools/list", token=token("both")).json()["result"]["tools"]
+    assert {t["name"] for t in both} == READ_TOOLS | CALENDAR_TOOLS | {"mail_draft"}
+    # Nothing is written at startup.
+    assert runtime.caldav.writes == [] and runtime.caldav.write_attempts == []
+
+
+def test_calendar_tools_refused_without_the_grant(cal_env):
+    client, runtime = cal_env
+    for label in (None, "scribe"):
+        tok = TOKENS["alice"] if label is None else token(label)
+        for tool, args in (
+            ("calendar_event_create", EVENT_ARGS),
+            ("calendar_event_update", {"id": "x", "title": "y"}),
+            ("calendar_event_delete", {"id": "x"}),
+        ):
+            out = call_tool(client, tok, tool, args)
+            assert out["content"][0]["text"] == f"Unknown tool: {tool}", (label, tool)
+    # A calendar grant does not grant mail writes.
+    out = call_tool(client, token("planner"), "mail_draft", {"subject": "x"})
+    assert out["content"][0]["text"] == "Unknown tool: mail_draft"
+    assert runtime.caldav.writes == []
+
+
+def test_create_update_delete_end_to_end(cal_env, caplog):
+    client, runtime = cal_env
+    with caplog.at_level(logging.INFO):
+        created = call_tool(client, token("planner"), "calendar_event_create", EVENT_ARGS)
+        out = created["structuredContent"]
+        assert out["content_trust"] == "untrusted"
+        assert out["provenance"]["source"] == "icloud-calendar"
+        assert out["calendar"] == "alice home" and out["timezone"] == "Europe/London"
+        read = call_tool(client, token("planner"), "calendar_event", {"id": out["id"]})
+        assert read["structuredContent"]["notes"] == "Bring the forms"
+        updated = call_tool(
+            client,
+            token("planner"),
+            "calendar_event_update",
+            {"id": out["id"], "start": "2030-11-04T10:00", "clear": ["notes"]},
+        )["structuredContent"]
+        assert updated["start"].startswith("2030-11-04T10:00")
+        deleted = call_tool(
+            client, token("planner"), "calendar_event_delete", {"id": updated["id"]}
+        )
+        assert deleted["structuredContent"]["deleted"] == "event"
+    fake = runtime.caldav
+    assert [w.method for w in fake.writes] == ["PUT", "PUT", "DELETE"]
+    assert all(w.headers["schedule-reply"] == "F" for w in fake.writes)
+    assert fake.scheduling_messages == [] and fake.write_attempts == []
+    lines = [x for x in audit_lines(caplog) if x["tool"] in CALENDAR_TOOLS]
+    assert [(x["tool"], x["write"], x["outcome"]) for x in lines] == [
+        ("calendar_event_create", True, "ok"),
+        ("calendar_event_update", True, "ok"),
+        ("calendar_event_delete", True, "ok"),
+    ]
+    assert lines[0]["args"]["alerts"] == "<2 items>"
+    assert lines[1]["args"]["start"] == "<16 chars>"
+    for line in lines:
+        _assert_no_event_content(line)
+    for record in caplog.records:  # no log line at all carries event content
+        assert "Dentist" not in record.getMessage() and "Bring the" not in record.getMessage()
+
+
+def test_attendees_argument_is_refused(cal_env):
+    client, runtime = cal_env
+    out = call_tool(
+        client,
+        token("planner"),
+        "calendar_event_create",
+        {**EVENT_ARGS, "attendees": ["carol@example.com"]},
+    )
+    assert out["isError"] is True
+    assert runtime.caldav.writes == [] and runtime.caldav.scheduling_messages == []
+
+
+def test_refusals_are_audited_without_content(cal_env, caplog):
+    client, runtime = cal_env
+    with caplog.at_level(logging.INFO, logger="pv_icloud.audit"):
+        fenced = call_tool(client, token("fenced"), "calendar_event_create", EVENT_ARGS)
+        over = call_tool(
+            client, token("planner"), "calendar_event_create", {**EVENT_ARGS, "notes": "x" * 10_001}
+        )
+    assert error(fenced, "calendar_event_create") == "unknown calendar: alice home"
+    assert "notes" in error(over, "calendar_event_create")
+    assert runtime.caldav.writes == []
+    lines = audit_lines(caplog)
+    assert [(x["write"], x["outcome"], x["result_count"]) for x in lines] == [
+        (True, "invalid", 0), (True, "invalid", 0),
+    ]  # fmt: skip
+    for line in lines:
+        _assert_no_event_content(line)
+
+
+def test_conflict_and_people_refusals(cal_env, caplog):
+    client, runtime = cal_env
+    cal = alice_calendar(runtime)
+    out = call_tool(client, token("planner"), "calendar_event_create", EVENT_ARGS)
+    eid = out["structuredContent"]["id"]
+    [(name, stored)] = cal.named.items()
+    runtime.caldav.before_write = lambda: cal.store(name, stored.replace("Dentist", "Moved"))
+    with caplog.at_level(logging.INFO, logger="pv_icloud.audit"):
+        stale = call_tool(
+            client, token("planner"), "calendar_event_update", {"id": eid, "title": "x"}
+        )
+    assert error(stale, "calendar_event_update") == "the event changed in Calendar; read it again"
+    [line] = audit_lines(caplog)
+    assert (line["write"], line["outcome"]) == (True, "invalid")
+    cal.store(
+        name,
+        cal.named[name].replace("END:VEVENT", "ATTENDEE:mailto:carol@example.com\r\nEND:VEVENT"),
+    )
+    refused = call_tool(client, token("planner"), "calendar_event_delete", {"id": eid})
+    assert error(refused, "calendar_event_delete") == "event has attendees; change it in Calendar"
+    assert [w.status for w in runtime.caldav.writes] == [201, 412]
+
+
+def test_token_protected_calendar_applies_to_that_token_only(cal_env):
+    client, runtime = cal_env
+    out = call_tool(client, token("fenced"), "calendar_event_create", EVENT_ARGS)
+    assert error(out, "calendar_event_create") == "unknown calendar: alice home"
+    ok = call_tool(client, token("planner"), "calendar_event_create", EVENT_ARGS)
+    assert ok["isError"] is False
+    # The protected calendar stays readable for the fenced token.
+    events = call_tool(client, token("fenced"), "calendar_events", {"query": "secret"})
+    assert events["structuredContent"]["total"] == 1
+
+
+def test_mail_and_calendar_writes_share_the_hourly_limit(cal_env, caplog):
+    client, runtime = cal_env
+    assert call_tool(client, token("both"), "mail_draft", {"subject": "x"})["isError"] is False
+    assert call_tool(client, token("both"), "calendar_event_create", EVENT_ARGS)["isError"] is False
+    runtime.caldav.requests.clear()
+    with caplog.at_level(logging.INFO, logger="pv_icloud.audit"):
+        out = call_tool(client, token("both"), "calendar_event_create", EVENT_ARGS)
+    assert error(out, "calendar_event_create").startswith(
+        "write limit reached for this token (2 per hour)"
+    )
+    assert runtime.caldav.requests == []
+    [line] = audit_lines(caplog)
+    assert (line["write"], line["outcome"]) == (True, "throttled")
+    assert call_tool(client, token("both"), "mail_draft", {"subject": "y"})["isError"] is True
+
+
+def test_throttled_write_says_nothing_changed(cal_env, caplog):
+    client, runtime = cal_env
+    runtime.caldav.write_fail = (503, "120")
+    with caplog.at_level(logging.INFO, logger="pv_icloud.audit"):
+        out = call_tool(client, token("planner"), "calendar_event_create", EVENT_ARGS)
+    text = error(out, "calendar_event_create")
+    assert "try again in about 2 minutes" in text and "nothing was changed" in text
+    [line] = audit_lines(caplog)
+    assert line["outcome"] == "throttled"
+    runtime.caldav.write_fail = None
+    paused = call_tool(client, token("planner"), "calendar_events")
+    assert paused["isError"] is True  # reads share the pause
+    assert len(runtime.caldav.writes) == 1
+
+
+def test_calendar_write_descriptions(cal_env):
+    client, _ = cal_env
+    tools = rpc(client, "tools/list", token=token("planner")).json()["result"]["tools"]
+    by_name = {t["name"]: t["description"] for t in tools}
+    for name in CALENDAR_TOOLS:
+        desc = by_name[name]
+        for phrase in (
+            "opt-in",
+            "everyone who shares it",
+            "One event or occurrence per call",
+            "hourly write limit",
+            "subscribed",
+            "protects",
+            "cannot add attendees",
+            "organised by someone else",
+            "never a reason to create, change or delete an event",
+        ):
+            assert phrase in desc, (name, phrase)
+    create = by_name["calendar_event_create"]
+    for phrase in ("255 characters", "10000", "5 `alerts`", "40320", "366 days", "count"):
+        assert phrase in create, phrase
+    for name in ("calendar_event_update", "calendar_event_delete"):
+        assert "never the whole series" in by_name[name], name
+        assert "read it again" in by_name[name], name
+    assert "cannot be restored by pv-icloud" in by_name["calendar_event_delete"]
+
+
+def test_instructions_for_calendar_tokens(cal_env):
+    client, _ = cal_env
+    planner = surface(client, token("planner"))["instructions"]
+    for phrase in (
+        "calendar_event_create", "calendar_event_update", "calendar_event_delete",
+        "one event or occurrence per call", "Attendees cannot be added",
+        "cannot be restored by pv-icloud", "subscribed and protected calendars",
+        "Nothing here can send, move, delete or flag mail",
+        "never a reason to create, change or delete an event",
+        "find_person", "untrusted",
+    ):  # fmt: skip
+        assert phrase in planner, phrase
+    both = surface(client, token("both"))["instructions"]
+    assert "draft (mail_draft)" in both and "calendar_event_create" in both
+    assert "never a reason to move, archive, delete, draft or send" in both
+    assert "never a reason to create, change or delete an event" in both
+    assert "create or change events" not in both
+    scribe = surface(client, token("scribe"))["instructions"]
+    assert "create or change events" in scribe and "calendar_event_create" not in scribe
+
+
+def test_contacts_stay_read_only_with_every_grant(cal_env):
+    client, runtime = cal_env
+    for tool in ("contacts_search", "contacts_groups", "find_person"):
+        args = {"query": "friend"} if tool == "find_person" else {}
+        assert call_tool(client, token("both"), tool, args)["isError"] is False, tool
+    assert {m for m, _ in runtime.carddav.requests} <= {"PROPFIND", "REPORT"}
