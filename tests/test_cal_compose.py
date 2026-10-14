@@ -460,3 +460,716 @@ class TestPeople:
         )
         with pytest.raises(ToolInputError, match="event has attendees"):
             compose.check_people(cal, ME)
+
+
+# --- series edits (ADR-0007) ----------------------------------------------------------------
+
+MON = dt.datetime(2027, 1, 4, 9)  # a Monday
+DAY = dt.timedelta(days=1)
+WEEK = dt.timedelta(weeks=1)
+HOUR = dt.timedelta(hours=1)
+PATH = "/111/calendars/home/0.ics"
+NEW_PATH = "/111/calendars/home/NEW-UID.ics"
+
+
+def stamp(value: dt.datetime) -> str:
+    return f"{value:%Y%m%dT%H%M%S}"
+
+
+def rid(value: dt.datetime) -> str:
+    return f"RECURRENCE-ID;TZID=America/Chicago:{stamp(value)}"
+
+
+def exdate(*values: dt.datetime) -> str:
+    return "EXDATE;TZID=America/Chicago:" + ",".join(stamp(v) for v in values)
+
+
+def master(rule: str = "FREQ=WEEKLY;COUNT=10", *extra: str, start=MON, uid="s", title="Class"):
+    end = start + (HOUR if isinstance(start, dt.datetime) else DAY)
+    tz = "America/Chicago" if isinstance(start, dt.datetime) else None
+    return vevent(uid, title, start, end, tz=tz, extra=(f"RRULE:{rule}", *extra))
+
+
+def override(original: dt.datetime, *extra: str, start=None, title="Class", uid="s"):
+    start = start or original
+    return vevent(uid, title, start, start + HOUR, extra=(rid(original), *extra))
+
+
+def at(value: dt.datetime) -> str:
+    return value.replace(tzinfo=CHI).isoformat()
+
+
+def plan(
+    text: str,
+    mode: str,
+    effective: str | None = None,
+    *,
+    others=(),
+    occurrence: str | None = None,
+    recurrence=None,
+    drop: bool = False,
+    preview: bool = False,
+    **changes,
+):
+    cal = parsed(text)
+    target = compose.find_target(cal, occurrence or at(MON), CHI)
+    assert target is not None
+    named = compose.Part(PATH, '"e0"', cal, compose.series_master(cal, target))
+    edit = compose.series_edit(mode, effective, Changes(**changes), recurrence, drop, preview)
+    out = compose.plan_series_edit(
+        named, list(others), edit, CHI, NOW,
+        new_uid="NEW-UID", new_value="SET-NEW", new_path=NEW_PATH,
+    )  # fmt: skip
+    return out, cal
+
+
+def written(out, path=PATH) -> icalendar.Calendar:
+    [w] = [w for w in out.writes if w.path == path]
+    return parsed(w.text)
+
+
+def starts(*texts: str, weeks: int = 80) -> list[tuple[dt.datetime | dt.date, str]]:
+    from pv_icloud.cal.expand import expand
+
+    lo = dt.datetime(2026, 9, 1, tzinfo=CHI)
+    out = []
+    for text in texts:
+        for occ in expand(parsed(text), lo, lo + weeks * WEEK, CHI):
+            start = (
+                occ.start.replace(tzinfo=None) if isinstance(occ.start, dt.datetime) else occ.start
+            )
+            out.append((start, str(occ.component.get("SUMMARY"))))
+    return sorted(out)
+
+
+def texts(out) -> list[str]:
+    return [w.text for w in out.writes]
+
+
+def series_master_of(cal: icalendar.Calendar, uid: str | None = None):
+    return next(
+        c
+        for c in vevents(cal)
+        if c.get("RECURRENCE-ID") is None and (uid is None or str(c["UID"]) == uid)
+    )
+
+
+class TestSeriesInput:
+    @pytest.mark.parametrize(
+        ("args", "field"),
+        [
+            (("this_and_following", None), "mode"),
+            (("replace_from", None), "effective"),
+            (("update_from", "next week"), "effective"),
+            (("update_from", "2027-01-11T09:00"), "effective"),
+            (("update_all", "2027-01-11"), "effective"),
+        ],
+    )
+    def test_mode_and_effective(self, args, field):
+        with pytest.raises(ToolInputError, match=field):
+            compose.series_edit(*args, Changes(title="x"), None)
+
+    @pytest.mark.parametrize("name", ["drop_unmatched", "preview"])
+    def test_booleans(self, name):
+        flags = {"drop_unmatched": False, "preview": False, name: "yes"}
+        with pytest.raises(ToolInputError, match=name):
+            compose.series_edit("update_all", None, Changes(title="x"), None, **flags)
+
+    def test_nothing_to_change_and_reset(self):
+        with pytest.raises(ToolInputError, match="nothing to change"):
+            compose.series_edit("update_all", None, Changes(), None)
+        with pytest.raises(ToolInputError, match="nothing to change"):
+            compose.series_edit("update_from", "2027-01-11", Changes(), None)
+        assert compose.series_edit("replace_all", None, Changes(), None).replace
+        assert compose.series_edit("update_all", None, Changes(), {"frequency": "daily"}).pattern
+
+    def test_start_before_effective(self):
+        with pytest.raises(ToolInputError, match="start"):
+            compose.series_edit(
+                "update_from", "2027-01-11", Changes(start="2027-01-04T09:00"), None
+            )
+
+    def test_field_limits_and_recurrence(self):
+        with pytest.raises(ToolInputError, match="title"):
+            compose.series_edit("update_all", None, Changes(title="x" * 256), None)
+        with pytest.raises(ToolInputError, match="recurrence"):
+            compose.series_edit("update_all", None, Changes(), {"frequency": "hourly"})
+
+    def test_pattern_and_field_edits(self):
+        def edit(**kw):
+            return compose.series_edit("update_all", None, Changes(**kw), None)
+
+        assert not edit(title="x", location="y", notes="z", alerts=(5,)).pattern
+        assert not edit(clear=frozenset({"notes"})).pattern
+        for kw in ({"start": "2027-01-04T10:00"}, {"end": "2027-01-04T11:00"},
+                   {"all_day": True}, {"timezone": "Europe/London"}):  # fmt: skip
+            assert edit(**kw).pattern, kw
+
+
+class TestSeriesShape:
+    def test_any_occurrence_names_the_series(self):
+        text = resource(master(), override(MON + 2 * WEEK, start=MON + 2 * WEEK + HOUR))
+        for occurrence in (at(MON), at(MON + WEEK), at(MON + 2 * WEEK + HOUR)):
+            out, _ = plan(text, "update_all", occurrence=occurrence, title="New")
+            assert [w.path for w in out.writes] == [PATH]
+
+    def test_single_event(self):
+        with pytest.raises(
+            ToolInputError, match="^not a recurring series; use calendar_event_update$"
+        ):
+            plan(resource(vevent("one", "One", MON, MON + HOUR)), "update_all", title="x")
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            resource(
+                master("FREQ=WEEKLY;COUNT=10", f"RDATE;TZID=America/Chicago:{stamp(MON + DAY)}")
+            ),
+            resource(master("FREQ=WEEKLY;COUNT=10", "EXRULE:FREQ=MONTHLY")),
+            resource(master("FREQ=WEEKLY;COUNT=10", "RRULE:FREQ=DAILY;COUNT=3")),
+            resource(
+                master(),
+                override(MON + WEEK).replace(
+                    "RECURRENCE-ID;", "RECURRENCE-ID;RANGE=THISANDFUTURE;"
+                ),
+            ),
+            resource(override(MON + WEEK)),  # a lone override, no master
+        ],
+    )
+    def test_refused_shapes(self, text):
+        with pytest.raises(
+            ToolInputError, match="^this series cannot be changed here; change it in Calendar$"
+        ):
+            plan(text, "update_all", occurrence=at(MON + WEEK), title="x")
+
+
+class TestSeriesDefinition:
+    def test_fields_kept_and_touched(self):
+        text = resource(
+            master("FREQ=WEEKLY;COUNT=10", "LOCATION:Room 1", "SEQUENCE:3", "X-APPLE-X:keep")
+        )
+        out, _ = plan(text, "update_all", title="New")
+        [ev] = vevents(written(out))
+        assert (str(ev["SUMMARY"]), str(ev["LOCATION"]), str(ev["X-APPLE-X"])) == (
+            "New",
+            "Room 1",
+            "keep",
+        )
+        assert int(ev["SEQUENCE"]) == 4 and ev["LAST-MODIFIED"].dt == NOW
+        assert ev["DTSTART"].dt == MON.replace(tzinfo=CHI) and "COUNT=10" in out.writes[0].text
+
+    def test_new_weekdays(self):
+        out, _ = plan(
+            resource(master("FREQ=WEEKLY;BYDAY=MO,WE;COUNT=6")), "update_all",
+            recurrence={"frequency": "weekly", "weekdays": ["TU", "TH"]},
+        )  # fmt: skip
+        [ev] = vevents(written(out))
+        assert ev["RRULE"].to_ical() == b"FREQ=WEEKLY;BYDAY=TU,TH"
+        assert ev["DTSTART"].dt == (MON + DAY).replace(tzinfo=CHI)  # the first Tuesday
+        days = {s.weekday() for s, _ in starts(*texts(out))}
+        assert days == {1, 3}
+
+    def test_new_time_of_day_keeps_the_length(self):
+        text = resource(
+            master("FREQ=DAILY;COUNT=5").replace(
+                "DTEND;TZID=America/Chicago:20270104T100000",
+                "DTEND;TZID=America/Chicago:20270104T093000",
+            )
+        )
+        out, _ = plan(text, "update_all", start="2027-01-04T10:00")
+        [ev] = vevents(written(out))
+        assert ev["DTSTART"].dt == MON.replace(hour=10, tzinfo=CHI)
+        assert ev["DTEND"].dt - ev["DTSTART"].dt == dt.timedelta(minutes=30)
+        assert [s.hour for s, _ in starts(*texts(out))] == [10] * 5
+
+    def test_new_start_from_a_date_is_the_anchor(self):
+        rule = {"frequency": "weekly", "weekdays": ["WE"], "count": 2}
+        out, _ = plan(
+            resource(master()),
+            "update_from",
+            "2027-02-01",
+            start="2027-02-03T08:00",
+            recurrence=rule,
+        )
+        new = series_master_of(written(out, NEW_PATH))
+        assert new["DTSTART"].dt == dt.datetime(2027, 2, 3, 8, tzinfo=CHI)
+
+    def test_zone_only_keeps_wall_clock_times(self):
+        out, _ = plan(resource(master()), "update_all", timezone="Europe/London")
+        text = out.writes[0].text
+        assert "DTSTART;TZID=Europe/London:20270104T090000" in text
+        assert "TZID:Europe/London" in text  # a matching VTIMEZONE
+
+    def test_definition_without_occurrence(self):
+        # Tuesdays until the first Monday: nothing.
+        rule = {"frequency": "weekly", "weekdays": ["TU"], "until": "2027-01-04"}
+        with pytest.raises(ToolInputError, match="no occurrence"):
+            plan(resource(master()), "update_all", recurrence=rule)
+
+    def test_all_day_until_follows_the_value_type(self):
+        until = dt.datetime(2027, 1, 25, 23, 59, 59, tzinfo=CHI).astimezone(dt.UTC)
+        text = resource(master(f"FREQ=WEEKLY;UNTIL={until:%Y%m%dT%H%M%SZ}"))
+        out, _ = plan(text, "update_all", all_day=True)
+        [ev] = vevents(written(out))
+        assert ev["DTSTART"].dt == MON.date() and ev["RRULE"]["UNTIL"] == [dt.date(2027, 1, 25)]
+        assert len(starts(*texts(out))) == 4
+
+
+class TestSeriesExceptions:
+    TEXT = resource(
+        master("FREQ=WEEKLY;COUNT=10", exdate(MON + WEEK, MON + 3 * WEEK)),
+        override(MON + 2 * WEEK, start=MON + 2 * WEEK + 5 * HOUR),  # moved to 14:00
+        override(MON + 4 * WEEK, title="Exam"),  # retitled
+    )
+
+    def test_replace_all_discards_everything(self):
+        out, _ = plan(self.TEXT, "replace_all", title="New")
+        cal = written(out)
+        [ev] = vevents(cal)
+        assert "EXDATE" not in ev and str(ev["SUMMARY"]) == "New"
+        assert out.exceptions == {"kept": 0, "discarded": 4, "unmatched": 0}
+        assert [t for _, t in starts(*texts(out))] == ["New"] * 10
+
+    def test_reset_with_no_field(self):
+        out, _ = plan(self.TEXT, "replace_all")
+        [ev] = vevents(written(out))
+        assert "EXDATE" not in ev and str(ev["SUMMARY"]) == "Class"
+
+    def test_update_all_keeps_exceptions(self):
+        out, _ = plan(self.TEXT, "update_all", location="Gym")
+        assert out.exceptions == {"kept": 4, "discarded": 0, "unmatched": 0}
+        got = {s: t for s, t in starts(*texts(out))}
+        assert MON + WEEK not in got and MON + 3 * WEEK not in got
+        assert got[MON + 2 * WEEK + 5 * HOUR] == "Class" and got[MON + 4 * WEEK] == "Exam"
+        locations = {str(c.get("LOCATION")) for c in vevents(written(out))}
+        assert locations == {"Gym"}
+        assert out.writes[0].text.count("EXDATE") == 1  # left as stored
+
+    def test_new_notes_reach_overrides_without_their_own(self):
+        text = resource(
+            master("FREQ=WEEKLY;COUNT=10", "DESCRIPTION:old"),
+            override(MON + WEEK, "DESCRIPTION:old"),
+            override(MON + 2 * WEEK, "DESCRIPTION:old"),
+            override(MON + 3 * WEEK, "DESCRIPTION:old", title="Retitled"),
+            override(MON + 4 * WEEK, "DESCRIPTION:own notes"),
+        )
+        out, _ = plan(text, "update_all", notes="new")
+        by_rid = {
+            c["RECURRENCE-ID"].dt.replace(tzinfo=None): c
+            for c in vevents(written(out))
+            if "RECURRENCE-ID" in c
+        }
+        for week in (1, 2, 3):
+            assert str(by_rid[MON + week * WEEK]["DESCRIPTION"]) == "new"
+        assert str(by_rid[MON + 3 * WEEK]["SUMMARY"]) == "Retitled"
+        assert str(by_rid[MON + 4 * WEEK]["DESCRIPTION"]) == "own notes"
+
+    def test_moved_occurrence_keeps_its_time_and_title_rule(self):
+        text = resource(
+            master("FREQ=DAILY;COUNT=10"),
+            override(MON + 2 * DAY, start=MON + 2 * DAY + 5 * HOUR),
+            override(MON + 3 * DAY, start=MON + 3 * DAY + 5 * HOUR, title="Own"),
+        )
+        out, _ = plan(text, "update_all", title="New", start="2027-01-04T10:00")
+        got = dict(starts(*texts(out)))
+        assert got[MON + 2 * DAY + 5 * HOUR] == "New" and got[MON + 3 * DAY + 5 * HOUR] == "Own"
+        assert got[MON + DAY + HOUR] == "New"
+
+    def test_unmoved_override_takes_the_new_time(self):
+        text = resource(master("FREQ=DAILY;COUNT=5"), override(MON + 2 * DAY, title="Own"))
+        out, _ = plan(text, "update_all", start="2027-01-04T10:00")
+        [ov] = [c for c in vevents(written(out)) if "RECURRENCE-ID" in c]
+        assert (
+            ov["RECURRENCE-ID"].dt == ov["DTSTART"].dt == (MON + 2 * DAY + HOUR).replace(tzinfo=CHI)
+        )
+        assert str(ov["SUMMARY"]) == "Own" and int(ov["SEQUENCE"]) == 1
+
+    def test_new_time_re_keys_a_deleted_occurrence(self):
+        feb15 = dt.datetime(2027, 2, 15, 9)
+        text = resource(master("FREQ=DAILY;COUNT=60", exdate(feb15)))
+        out, _ = plan(text, "update_all", start="2027-01-04T10:00")
+        [ev] = vevents(written(out))
+        assert [d.dt for d in ev["EXDATE"].dts] == [(feb15 + HOUR).replace(tzinfo=CHI)]
+        assert not any(s.date() == feb15.date() for s, _ in starts(*texts(out)))
+        assert out.unmatched == []
+
+    def test_re_keyed_override_carries_the_recurrence_set(self):
+        text = resource(
+            master(
+                "FREQ=DAILY;COUNT=5", "RELATED-TO;RELTYPE=X-CALENDARSERVER-RECURRENCE-SET:SET-1"
+            ),
+            override(MON + DAY, title="Own"),
+        )
+        out, _ = plan(text, "update_all", start="2027-01-04T10:00")
+        [ov] = [c for c in vevents(written(out)) if "RECURRENCE-ID" in c]
+        assert compose.recurrence_set(ov) == "SET-1"
+        # Not re-keyed: left as stored.
+        same, _ = plan(text, "update_all", title="New")
+        [ov] = [c for c in vevents(written(same)) if "RECURRENCE-ID" in c]
+        assert compose.recurrence_set(ov) is None
+
+    WEEKDAYS = resource(
+        master("FREQ=WEEKLY;BYDAY=MO,WE;COUNT=8", exdate(MON + 2 * DAY)),
+        override(MON + WEEK, title="Changed Monday"),
+    )
+
+    def test_deleted_occurrence_that_no_longer_fits(self):
+        out, _ = plan(
+            self.WEEKDAYS,
+            "update_all",
+            recurrence={"frequency": "weekly", "weekdays": ["MO"], "count": 4},
+        )
+        assert out.unmatched == [{"kind": "deleted", "original_start": at(MON + 2 * DAY)}]
+        assert out.exceptions == {"kept": 1, "discarded": 0, "unmatched": 1}
+        [ev] = [c for c in vevents(written(out)) if "RECURRENCE-ID" not in c]
+        assert "EXDATE" not in ev
+        assert (MON + WEEK, "Changed Monday") in starts(*texts(out))
+
+    def test_changed_occurrence_that_no_longer_fits(self):
+        rule = {"frequency": "weekly", "weekdays": ["WE"], "count": 4}
+        with pytest.raises(
+            ToolInputError,
+            match="^1 changed occurrences no longer fit the new pattern; preview to see them, "
+            "or pass drop_unmatched: true to drop them$",
+        ):
+            plan(self.WEEKDAYS, "update_all", recurrence=rule)
+        out, _ = plan(self.WEEKDAYS, "update_all", recurrence=rule, preview=True)
+        assert out.requires_drop_unmatched is True
+        assert out.unmatched == [{
+            "kind": "changed", "original_start": at(MON + WEEK), "start": at(MON + WEEK),
+            "end": at(MON + WEEK + HOUR), "title": "Changed Monday",
+        }]  # fmt: skip
+        out, _ = plan(self.WEEKDAYS, "update_all", recurrence=rule, drop=True)
+        assert out.requires_drop_unmatched is False
+        assert "RECURRENCE-ID" not in out.writes[0].text
+        assert "Changed Monday" not in out.writes[0].text
+        assert len(out.unmatched) == 1
+
+    def test_two_occurrences_that_day_do_not_match(self):
+        text = resource(master("FREQ=DAILY;BYHOUR=9,15;COUNT=6", exdate(MON + DAY)))
+        out, _ = plan(text, "update_all", end="2027-01-04T09:30")
+        assert out.unmatched == [{"kind": "deleted", "original_start": at(MON + DAY)}]
+
+    def test_all_day_change_keeps_no_override(self):
+        text = resource(
+            master("FREQ=DAILY;COUNT=5", exdate(MON + DAY)), override(MON + 2 * DAY, title="Own")
+        )
+        out, _ = plan(text, "update_all", all_day=True, drop=True)
+        [ev] = vevents(written(out))
+        assert [d.dt for d in ev["EXDATE"].dts] == [(MON + DAY).date()]
+        assert [e["kind"] for e in out.unmatched] == ["changed"]
+
+    def test_cancelled_override_is_a_deleted_occurrence(self):
+        text = resource(master("FREQ=DAILY;COUNT=5"), override(MON + DAY, "STATUS:CANCELLED"))
+        out, _ = plan(text, "update_all", recurrence={"frequency": "weekly", "count": 2})
+        assert out.unmatched == [{"kind": "deleted", "original_start": at(MON + DAY)}]
+        out, _ = plan(text, "update_all", title="New")
+        assert out.occurrences == 4
+
+    def test_side_of_the_date_is_the_original_start(self):
+        # Moved from after the date to before it: it belongs to the part from the date.
+        text = resource(master(), override(MON + 5 * WEEK, start=MON + 3 * WEEK + DAY))
+        out, _ = plan(text, "update_from", "2027-02-01", location="Gym")
+        assert "RECURRENCE-ID" not in out.writes[1].text
+        [ov] = [c for c in vevents(written(out, NEW_PATH)) if "RECURRENCE-ID" in c]
+        assert ov["DTSTART"].dt == (MON + 3 * WEEK + DAY).replace(tzinfo=CHI)
+        assert str(ov["UID"]) == "NEW-UID" and str(ov["LOCATION"]) == "Gym"
+
+
+class TestSeriesSplit:
+    def test_apples_cut(self):
+        start = dt.datetime(2026, 10, 6, 9)  # a Tuesday
+        out, cal = plan(resource(master("FREQ=WEEKLY;COUNT=10", start=start)), "update_from",
+                        "2026-11-03", occurrence=at(start), title="Later")  # fmt: skip
+        new, old = out.writes
+        assert (new.path, new.etag, old.path, old.etag) == (NEW_PATH, None, PATH, '"e0"')
+        assert "RRULE:FREQ=WEEKLY;UNTIL=20261103T055959Z" in old.text and "COUNT" not in old.text
+        old_master, new_master = (
+            series_master_of(parsed(old.text)),
+            series_master_of(parsed(new.text)),
+        )
+        value = compose.recurrence_set(old_master)
+        assert value == "SET-NEW" == compose.recurrence_set(new_master)
+        assert value not in (str(old_master["UID"]), str(new_master["UID"]))
+        assert "RELATED-TO;RELTYPE=X-CALENDARSERVER-RECURRENCE-SET:SET-NEW" in new.text
+        assert new_master["DTSTART"].dt == dt.datetime(2026, 11, 3, 9, tzinfo=CHI)
+        assert "COUNT=6" in new.text and str(new_master["SUMMARY"]) == "Later"
+        assert out.split and out.previous == {
+            "uid": "s",
+            "last_start": at(dt.datetime(2026, 10, 27, 9)),
+        }
+        both = starts(old.text, new.text)
+        assert [s for s, _ in both] == [start + i * WEEK for i in range(10)]
+        assert [t for _, t in both] == ["Class"] * 4 + ["Later"] * 6
+
+    def test_cut_across_a_dst_change(self):
+        out, _ = plan(resource(master("FREQ=WEEKLY")), "update_from", "2027-03-15", title="x")
+        assert "UNTIL=20270315T045959Z" in out.writes[1].text  # CDT (UTC-5) on 14 March
+
+    def test_all_day_cut(self):
+        text = resource(master("FREQ=WEEKLY", start=MON.date()))
+        out, _ = plan(
+            text, "update_from", "2027-03-01", occurrence=MON.date().isoformat(), title="x"
+        )
+        assert "RRULE:FREQ=WEEKLY;UNTIL=20270228\r\n" in out.writes[1].text
+
+    def test_floating_cut(self):
+        text = resource(
+            vevent("s", "Class", MON, MON + HOUR, tz=None, extra=("RRULE:FREQ=WEEKLY",))
+        )
+        out, _ = plan(text, "update_from", "2027-02-01", occurrence=MON.isoformat(), title="x")
+        assert (
+            "UNTIL=20270131T235959;" in out.writes[1].text
+            or "UNTIL=20270131T235959\r" in out.writes[1].text
+        )
+
+    def test_recurrence_set_value_reused(self):
+        text = resource(
+            master("FREQ=WEEKLY", "RELATED-TO;RELTYPE=X-CALENDARSERVER-RECURRENCE-SET:OLD-SET")
+        )
+        out, _ = plan(text, "update_from", "2027-02-01", title="x")
+        new, old = (series_master_of(parsed(w.text)) for w in out.writes)
+        assert compose.recurrence_set(new) == compose.recurrence_set(old) == "OLD-SET"
+        assert out.writes[1].text.count("RELATED-TO") == 1
+
+    def test_count_split_keeps_the_dates(self):
+        text = resource(master("FREQ=WEEKLY;COUNT=10", exdate(MON + WEEK)))
+        before = starts(text)
+        out, _ = plan(text, "update_from", "2027-02-01", location="x")  # the fifth occurrence
+        new, old = out.writes
+        assert "UNTIL=20270201T055959Z" in old.text and "COUNT" not in old.text
+        assert "COUNT=6" in new.text
+        assert [s for s, _ in starts(*texts(out))] == [s for s, _ in before]
+
+    def test_earlier_part_kept_as_stored(self):
+        early = override(MON + WEEK, "X-APPLE-TRAVEL-ADVISORY-BEHAVIOR:AUTOMATIC", title="Early")
+        late = override(MON + 6 * WEEK, title="Late")
+        text = resource(
+            master("FREQ=WEEKLY;COUNT=10", exdate(MON + 2 * WEEK, MON + 7 * WEEK)), early, late
+        )
+        out, _ = plan(text, "update_from", "2027-02-01", location="Gym")
+        new, old = out.writes
+        [kept] = [c for c in vevents(parsed(old.text)) if "RECURRENCE-ID" in c]
+        [stored] = [c for c in vevents(parsed(text)) if str(c["SUMMARY"]) == "Early"]
+        assert props(kept) == props(stored)  # every property as stored
+        assert "Late" not in old.text and stamp(MON + 7 * WEEK) not in old.text
+        assert stamp(MON + 2 * WEEK) in old.text
+        new_cal = parsed(new.text)
+        [ov] = [c for c in vevents(new_cal) if "RECURRENCE-ID" in c]
+        assert (str(ov["UID"]), str(ov["SUMMARY"]), compose.recurrence_set(ov)) == (
+            "NEW-UID",
+            "Late",
+            "SET-NEW",
+        )
+        assert [d.dt for d in series_master_of(new_cal)["EXDATE"].dts] == [
+            (MON + 7 * WEEK).replace(tzinfo=CHI)
+        ]
+        assert out.exceptions == {"kept": 2, "discarded": 0, "unmatched": 0}
+
+    def test_new_resource_copies_the_master(self):
+        text = resource(master(
+            "FREQ=WEEKLY", "LOCATION:Room 1",
+            "X-APPLE-STRUCTURED-LOCATION;VALUE=URI;X-TITLE=Room 1:geo:1,2", "TRANSP:TRANSPARENT",
+            "SEQUENCE:4", "ORGANIZER;EMAIL=me@example.net:/111/principal/",
+            "ATTENDEE;EMAIL=me@example.net:/111/principal/",
+            "BEGIN:VALARM", "ACTION:DISPLAY", "DESCRIPTION:Reminder", "TRIGGER:-PT10M",
+            "END:VALARM",
+        ))  # fmt: skip
+        out, _ = plan(text, "replace_from", "2027-02-01")
+        cal = parsed(out.writes[0].text)
+        ev = series_master_of(cal)
+        assert str(ev["UID"]) == "NEW-UID" and int(ev["SEQUENCE"]) == 0
+        assert ev["CREATED"].dt == ev["DTSTAMP"].dt == NOW
+        for name in ("LOCATION", "X-APPLE-STRUCTURED-LOCATION", "TRANSP"):
+            assert name in ev, name
+        assert "ORGANIZER" not in out.writes[0].text and "ATTENDEE" not in out.writes[0].text
+        assert [a["TRIGGER"].dt for a in ev.walk("VALARM")] == [-dt.timedelta(minutes=10)]
+        assert [tz["TZID"] for tz in cal.walk("VTIMEZONE")] == ["America/Chicago"]
+        old = series_master_of(parsed(out.writes[1].text))
+        assert int(old["SEQUENCE"]) == 5 and "ORGANIZER" in old
+
+    def test_no_occurrence_on_or_after_the_date(self):
+        with pytest.raises(
+            ToolInputError, match="^the series has no occurrence on or after 2027-06-07$"
+        ):
+            plan(resource(master()), "update_from", "2027-06-07", title="x")
+
+    @pytest.mark.parametrize("effective", ["2027-01-04", "2026-12-01"])
+    def test_effective_at_or_before_the_first_occurrence_changes_in_place(self, effective):
+        out, _ = plan(
+            resource(master(), override(MON + WEEK, title="Own")),
+            "update_from",
+            effective,
+            title="New",
+        )
+        [w] = out.writes
+        assert (w.path, w.etag, out.split, out.previous) == (PATH, '"e0"', False, None)
+        assert {t for _, t in starts(w.text)} == {"New", "Own"}
+
+
+def part(path: str, *events: str, etag: str | None = None) -> compose.Part:
+    cal = parsed(resource(*events))
+    return compose.Part(path, etag or f'"{path}"', cal, series_master_of(cal))
+
+
+SET = "RELATED-TO;RELTYPE=X-CALENDARSERVER-RECURRENCE-SET:SET-1"
+FIRST = master("FREQ=WEEKLY;UNTIL=20270223T055959Z", SET)  # 2027-01-04 to 2027-02-22: 8
+SECOND = master("FREQ=WEEKLY", SET, start=dt.datetime(2027, 3, 1, 9), uid="s2", title="Class B")
+
+
+class TestRecurrenceSets:
+    def test_pick_parts_by_the_masters_value(self):
+        other = master("FREQ=DAILY", SET.replace("SET-1", "OTHER"), uid="o")
+        listed = [
+            ("/c/0.ics", resource(FIRST), '"0"'),
+            ("/c/1.ics", resource(SECOND), '"1"'),
+            ("/c/2.ics", resource(other), '"2"'),
+            ("/c/3.ics", resource(master("FREQ=DAILY", "RELATED-TO:SET-1", uid="p")), '"3"'),
+            ("/c/4.ics", resource(override(MON, SET, uid="q")), '"4"'),
+            ("/c/5.ics", "not icalendar", '"5"'),
+            ("/c/1.ics", resource(SECOND), '"1"'),
+        ]  # fmt: skip
+        found = compose.pick_parts(listed, "SET-1", ["/c/0.ics"])
+        assert [(p.path, p.etag, p.uid) for p in found] == [("/c/1.ics", '"1"', "s2")]
+
+    def test_field_edits_across_parts(self):
+        second = part("/c/1.ics", SECOND)
+        out, _ = plan(resource(FIRST), "update_all", others=[second], title="New")
+        assert [(w.path, w.etag) for w in out.writes] == [
+            (PATH, '"e0"'),
+            ("/c/1.ics", '"/c/1.ics"'),
+        ]
+        assert {t for _, t in starts(*texts(out), weeks=20)} == {"New"}
+        assert (out.found, out.changed, out.split) == (2, 2, False)
+
+    @pytest.mark.parametrize(
+        ("mode", "changes"),
+        [("replace_all", {}), ("update_all", {"start": "2027-01-04T10:00"}),
+         ("update_all", {"recurrence": {"frequency": "daily"}})],
+    )  # fmt: skip
+    def test_whole_set_pattern_refused(self, mode, changes):
+        with pytest.raises(
+            ToolInputError,
+            match=r"^this series was split; change it from a date \(replace_from / update_from\)$",
+        ):
+            plan(resource(FIRST), mode, others=[part("/c/1.ics", SECOND)], **changes)
+
+    def test_from_a_date_with_a_later_part(self):
+        out, _ = plan(
+            resource(FIRST),
+            "update_from",
+            "2027-02-01",
+            others=[part("/c/1.ics", SECOND)],
+            location="Gym",
+        )
+        assert [(w.path, w.etag is None) for w in out.writes] == [
+            (NEW_PATH, True), (PATH, False), ("/c/1.ics", False),
+        ]  # fmt: skip
+        assert "LOCATION:Gym" in out.writes[2].text and "LOCATION" not in out.writes[1].text
+        assert (out.found, out.changed, out.split) == (2, 2, True)
+
+    @pytest.mark.parametrize(
+        ("mode", "changes"),
+        [("update_from", {"recurrence": {"frequency": "daily"}}), ("replace_from", {})],
+    )
+    def test_pattern_from_a_date_with_a_later_part(self, mode, changes):
+        with pytest.raises(
+            ToolInputError,
+            match="^this series was split on 2027-03-01; change its pattern from that date or "
+            "later$",
+        ):
+            plan(resource(FIRST), mode, "2027-02-01", others=[part("/c/1.ics", SECOND)], **changes)
+
+    def test_from_the_start_of_a_later_part(self):
+        out, _ = plan(
+            resource(FIRST), "update_from", "2027-03-01", others=[part("/c/1.ics", SECOND)],
+            recurrence={"frequency": "weekly", "weekdays": ["TU"]},
+        )  # fmt: skip
+        [w] = out.writes
+        assert (w.path, out.split, out.found, out.changed) == ("/c/1.ics", False, 2, 1)
+
+    def test_the_part_containing_the_date_is_split(self):
+        # Named through the later part; the date falls in the first part.
+        first = part(PATH, FIRST, etag='"e0"')
+        cal = parsed(resource(SECOND))
+        named = compose.Part("/c/1.ics", '"1"', cal, series_master_of(cal))
+        edit = compose.series_edit("update_from", "2027-02-01", Changes(title="x"), None)
+        out = compose.plan_series_edit(
+            named, [first], edit, CHI, NOW, new_uid="NEW-UID", new_value="v", new_path=NEW_PATH
+        )
+        assert [w.path for w in out.writes] == [NEW_PATH, PATH, "/c/1.ics"]
+        assert compose.recurrence_set(series_master_of(parsed(out.writes[0].text))) == "SET-1"
+
+    def test_too_many_parts(self):
+        others = [
+            part(
+                f"/c/{i}.ics",
+                master("FREQ=WEEKLY;COUNT=2", SET, start=MON + i * 4 * WEEK, uid=f"p{i}"),
+            )
+            for i in range(1, 11)
+        ]
+        with pytest.raises(
+            ToolInputError, match="^this series has more than 10 parts; change it in Calendar$"
+        ):
+            plan(
+                resource(master("FREQ=WEEKLY;COUNT=2", SET)), "update_all", others=others, title="x"
+            )
+        out, _ = plan(
+            resource(master("FREQ=WEEKLY;COUNT=2", SET)), "update_all", others=others[:9], title="x"
+        )
+        assert len(out.writes) == 10
+        assert [w.uid for w in out.writes] == ["s", *(f"p{i}" for i in range(1, 10))]  # in order
+
+    def test_invited_later_part_is_refused_by_the_people_check(self):
+        invited = part(
+            "/c/1.ics",
+            SECOND.replace("END:VEVENT", "ATTENDEE:mailto:carol@example.com\r\nEND:VEVENT"),
+        )
+        with pytest.raises(ToolInputError, match="event has attendees"):
+            compose.check_people(invited.cal, ME)
+
+    def windows(self, events, mode, effective=None, today=dt.date(2027, 6, 1)):
+        cal = parsed(resource(*events))
+        named = compose.Part(PATH, '"e"', cal, series_master_of(cal))
+        edit = compose.series_edit(mode, effective, Changes(title="x"), None)
+        return compose.part_windows(named, edit, CHI, today)
+
+    def test_listing_windows(self):
+        last = dt.datetime(2027, 2, 22, 9, tzinfo=CHI).astimezone(dt.UTC)
+        first = MON.replace(tzinfo=CHI).astimezone(dt.UTC)
+        since = dt.datetime(2026, 5, 31, tzinfo=CHI).astimezone(dt.UTC)
+        assert self.windows([FIRST], "update_all") == ([(last, None), (since, first)], "2026-05-31")
+        # An endless named part has no later parts; one starting before the window, no earlier.
+        later = dt.datetime(2027, 3, 1, tzinfo=CHI).astimezone(dt.UTC)
+        assert self.windows([SECOND], "update_all", today=dt.date(2028, 6, 1)) == ([], "2027-06-01")
+        assert self.windows([SECOND], "replace_all") == (
+            [(since, later.replace(hour=15))],
+            "2026-05-31",
+        )
+        effective = dt.datetime(2027, 3, 8, tzinfo=CHI).astimezone(dt.UTC)
+        assert self.windows([FIRST], "update_from", "2027-03-08") == ([(effective, None)], None)
+
+
+class TestSeriesCounts:
+    def test_counts_from_a_date(self):
+        nov = [MON + i * WEEK for i in (12, 14, 17)]
+        text = resource(master("FREQ=WEEKLY;COUNT=20", exdate(*nov)))
+        out, _ = plan(text, "update_from", (MON + 10 * WEEK).date().isoformat(), location="x")
+        assert (out.occurrences, out.occurrences_through) == (7, None)
+        assert out.exceptions == {"kept": 3, "discarded": 0, "unmatched": 0}
+
+    def test_endless_series(self):
+        out, _ = plan(resource(master("FREQ=WEEKLY")), "update_all", title="x")
+        assert out.occurrences == 53  # 366 days from Monday 2027-01-04
+        assert out.occurrences_through == "2028-01-04"
+
+    def test_first_occurrence_skips_deleted_ones(self):
+        text = resource(master("FREQ=WEEKLY;COUNT=5", exdate(MON)))
+        out, _ = plan(text, "update_all", occurrence=at(MON + WEEK), title="x")
+        assert out.first["DTSTART"].dt == (MON + WEEK).replace(tzinfo=CHI)
+        assert out.occurrences == 4
+
+    def test_counts_over_several_parts(self):
+        out, _ = plan(resource(FIRST), "update_all", others=[part("/c/1.ics", SECOND)], title="x")
+        # 8 in the first part; the endless second through 2028-01-04.
+        assert out.occurrences == 8 + 45 and out.occurrences_through == "2028-01-04"

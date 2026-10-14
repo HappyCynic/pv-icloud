@@ -27,7 +27,7 @@ ADR-0007 (design decision 11). Each group ends with its tests passing.
 
 ## 3. Series edits in iCalendar composition
 
-- [ ] 3.1 Write failing tests in `tests/test_cal_compose.py` for: finding the series from any
+- [x] 3.1 Write failing tests in `tests/test_cal_compose.py` for: finding the series from any
   occurrence id (master or override); refusing single events, `RDATE`, `EXRULE`, several
   `RRULE`s, `RANGE=THISANDFUTURE` and a lone override; the new definition (fields kept when
   not given, `start`/`end` as the first changed occurrence, the new `DTSTART` as the first
@@ -35,7 +35,7 @@ ADR-0007 (design decision 11). Each group ends with its tests passing.
   definition with no occurrence refused, `SEQUENCE`/`LAST-MODIFIED`, `TZID` and
   `VTIMEZONE`); pattern fields vs. field edits; `nothing to change` for `update_*` and a reset
   for `replace_*`; input checks for `mode`, `effective`, `drop_unmatched` and `preview`.
-- [ ] 3.2 Write failing tests for exceptions: classification (`EXDATE`, override,
+- [x] 3.2 Write failing tests for exceptions: classification (`EXDATE`, override,
   `STATUS:CANCELLED`), the side of the date by original start in the series' zone, discard in
   `replace_*`, match by day and re-key in `update_*` (new time of day, new weekdays, more than
   one occurrence that day), field propagation to overrides (inherited vs. own values, as in
@@ -43,12 +43,13 @@ ADR-0007 (design decision 11). Each group ends with its tests passing.
   entries, unmatched deleted occurrences dropped, unmatched changed occurrences refused
   without `drop_unmatched` (error holds only the count) and dropped with it, and
   `requires_drop_unmatched` in a preview.
-- [ ] 3.3 Write failing tests for the split in Apple's format: `UNTIL` at 23:59:59 local on
+- [x] 3.3 Write failing tests for the split in Apple's format: `UNTIL` at 23:59:59 local on
   the day before `effective` in UTC (`20261103T055959Z` for America/Chicago and 2026-11-03,
   and a date across a DST change), floating and all-day (`DATE` of the day before) forms,
   `COUNT` replaced by `UNTIL` on
   the old part and the remaining `COUNT` on the new one; earlier overrides and `X-APPLE-*`
-  properties kept byte for byte; later exceptions removed from the old part; the new resource
+  properties kept property for property (the iCalendar writer orders properties its own way,
+  as for every calendar write); later exceptions removed from the old part; the new resource
   (new UUID, `SEQUENCE` 0, every master property and alarm copied, `LOCATION`,
   `X-APPLE-STRUCTURED-LOCATION` and `TRANSP` included, no `ORGANIZER` or `ATTENDEE`, rest of
   the old rule or the new one, kept exceptions with the new `UID`); the recurrence-set
@@ -57,7 +58,7 @@ ADR-0007 (design decision 11). Each group ends with its tests passing.
   none), with the cut part's remaining overrides left as stored; the "no occurrence on or
   after" error; and `effective` on or before the first occurrence changing the part in place
   (`parts.split` false), with or without a recurrence set.
-- [ ] 3.4 Write failing tests for recurrence sets: picking parts out of a listing by their
+- [x] 3.4 Write failing tests for recurrence sets: picking parts out of a listing by their
   masters' `RELATED-TO` value and `RELTYPE` (other events, overrides and other values
   ignored), ordering by first occurrence, the 10-part cap, field edits applied per part,
   refusals of `replace_all`, of pattern changes in `update_all`, and of pattern changes and
@@ -67,10 +68,10 @@ ADR-0007 (design decision 11). Each group ends with its tests passing.
   `effective`, none for an endless named part in the `_all` modes; earlier parts from 366
   days before today to the named part's first occurrence, `_all` modes only, skipped when
   that is before the window) and `searched_from`.
-- [ ] 3.5 Write failing tests for counting: `occurrences` after deleted ones are removed,
+- [x] 3.5 Write failing tests for counting: `occurrences` after deleted ones are removed,
   bounded series, endless series through 366 days with `occurrences_through`, counts over
   several parts, `parts`, and the `exceptions` counts.
-- [ ] 3.6 Implement series edits in `src/pv_icloud/cal/compose.py` (pure functions, reusing
+- [x] 3.6 Implement series edits in `src/pv_icloud/cal/compose.py` (pure functions, reusing
   `find_target`, `check_people`, `_like`, `_touch` and `cal/expand.py`) and verify 3.1–3.5
   pass.
 
