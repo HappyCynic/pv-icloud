@@ -124,6 +124,14 @@ def check_changes(changes: Changes, *, creating: bool) -> None:
             raise ToolInputError(f"alerts: minutes before the start, 0 to {ALERT_MAX_MINUTES}")
     if changes.timezone is not None:
         zone(changes.timezone)
+    for name in ("start", "end"):  # the format only; the times are checked with the event
+        value = getattr(changes, name)
+        if value is None:
+            continue
+        if changes.all_day is True or (changes.all_day is None and len(value) == 10):
+            _date(value, name)
+        else:
+            _datetime(value, name, dt.UTC)
 
 
 def zone(name: str) -> zoneinfo.ZoneInfo:
@@ -367,11 +375,12 @@ def to_text(cal: icalendar.Calendar) -> str:
     return cal.to_ical().decode()
 
 
-def occurrence_text(component: icalendar.cal.Component, start: Moment, recurring: bool) -> str:
-    """One instance as an expanded read would return it, so the result of a write is
-    formatted (and its id built) by the same code as calendar_event's."""
+def occurrence_text(component: icalendar.cal.Component, recurring: bool) -> str:
+    """The component's first instance as an expanded read would return it, so the result
+    of a write is formatted (and its id built) by the same code as calendar_event's."""
     inst = copy.deepcopy(component)
-    length = _length(component, _value(component, "DTSTART"))
+    start = _value(component, "DTSTART")
+    length = _length(component, start)
     for name in (*_SERIES_PROPS, "DURATION"):
         inst.pop(name, None)
     _set(inst, "DTSTART", start)

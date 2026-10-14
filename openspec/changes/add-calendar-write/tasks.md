@@ -102,7 +102,7 @@ approved the proposal. Each group ends with its tests passing.
 
 ## 7. Create, update and delete in the calendar service
 
-- [ ] 7.1 Write tests in a new `tests/test_calendar_write.py`: create (timed, all-day,
+- [x] 7.1 Write tests in a new `tests/test_calendar_write.py`: create (timed, all-day,
   recurring, with alerts) readable at once by `calendar_event` with the returned id; update
   of one field keeps the rest; edit and delete of one occurrence leave the others unchanged;
   delete of a single event; every update and delete re-reads the resource and sends that
@@ -115,7 +115,7 @@ approved the proposal. Each group ends with its tests passing.
   an attendee other than the account, and principal paths without a known `EMAIL=` refused
   before any write; events whose only organiser and attendee are the account's principal
   path allowed; `scheduling_messages` stays empty in every test.
-- [ ] 7.2 Implement create, update and delete in `src/pv_icloud/cal/service.py`; verify 7.1
+- [x] 7.2 Implement create, update and delete in `src/pv_icloud/cal/service.py`; verify 7.1
   passes.
 
 ## 8. Tools, permissions and audit

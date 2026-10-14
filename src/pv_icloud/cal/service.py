@@ -9,12 +9,14 @@ import datetime as dt
 import threading
 import time
 import urllib.parse
+import uuid
 import zoneinfo
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import httpx
+import icalendar
 
 from ..config import AccountConfig
 from ..dav import DavThrottled, home_may_have_moved
@@ -25,6 +27,10 @@ from .expand import expand
 from .feeds import FeedClient, FeedError, feed_url
 from .ids import BadEventId, EventId, decode_event_id
 from .parse import Event, feed_ref, parse_occurrences, parse_resource
+
+if TYPE_CHECKING:  # the write modules are imported only when calendar writes are on
+    from .caldav_write import CalDavWriter
+    from .compose import Changes
 
 EVENTS_LIMIT_DEFAULT = 100
 EVENTS_LIMIT_MAX = 200
@@ -50,10 +56,12 @@ class CalendarService:
         feeds: FeedClient | None = None,
         *,
         clock: Callable[[], float] = time.monotonic,
+        writer: CalDavWriter | None = None,
     ):
         self.account = account
         self.client = client
         self.feeds = feeds if account.calendar.subscriptions else None
+        self.writer = writer  # only when PV_ICLOUD_CALENDAR_WRITE=enabled (ADR-0005)
         self._clock = clock
         self._lock = threading.Lock()
         self._cached: tuple[float, list[CalendarInfo]] | None = None
@@ -409,3 +417,131 @@ class CalendarService:
         name = urllib.parse.unquote(eid.path[len(cal_path) :])
         if not eid.path.startswith(cal_path) or not name or "/" in name or name in (".", ".."):
             raise ToolInputError("malformed event id")
+
+    # --- writes (ADR-0005) -------------------------------------------------------------------
+
+    def _writable(
+        self, cals: list[CalendarInfo], protected: Sequence[str], *, key: str, by_id: bool
+    ) -> CalendarInfo:
+        """The one in-scope calendar `key` names that this caller may write to. Excluded,
+        missing, subscribed, protected and read-only calendars all get the same error, so
+        nothing is learnt about them; iCloud's 403 is never relied on."""
+        fence = set(self.account.calendar.write.protected_calendars) | set(protected)
+        match = [
+            c for c in cals if c.id == key or (not by_id and c.name.casefold() == key.casefold())
+        ]
+        usable = [c for c in match if c.kind == "calendar" and c.writable and c.name not in fence]
+        if len(usable) != len(match) or not usable:
+            raise ToolInputError(f"unknown calendar: {key}")
+        if len(usable) > 1:
+            raise ToolInputError(f"more than one calendar is called {key}; use its id")
+        return usable[0]
+
+    def _require_writer(self) -> CalDavWriter:
+        if self.writer is None:  # unreachable: the tools exist only with the switch on
+            raise RuntimeError("calendar writes are not enabled")
+        return self.writer
+
+    @staticmethod
+    def _now() -> dt.datetime:
+        return dt.datetime.now(dt.UTC).replace(microsecond=0)
+
+    def _written(
+        self,
+        cal: CalendarInfo,
+        component: icalendar.cal.Component,
+        recurring: bool,
+        tz: dt.tzinfo,
+        path: str,
+    ) -> dict:
+        """The result of a create or update, formatted by the read path's own code, so the
+        id works with calendar_event at once."""
+        from .compose import occurrence_text
+
+        [event] = parse_resource(occurrence_text(component, recurring), cal, tz, path)
+        keys = ("id", "uid", "calendar", "calendar_id", "start", "end", "all_day", "recurring")
+        out = {k: event.data[k] for k in keys}
+        out["timezone"] = event.data.get("timezone")
+        return out
+
+    def create_event(
+        self,
+        *,
+        calendar: str,
+        changes: Changes,
+        recurrence: Mapping[str, Any] | None = None,
+        protected: Sequence[str] = (),
+    ) -> dict:
+        from . import compose
+
+        writer = self._require_writer()
+        rule = compose.parse_recurrence(recurrence)
+        compose.new_event(changes, rule, dt.UTC, "check", self._now())  # inputs, before iCloud
+        cals = self._in_scope()
+        cal = self._writable(cals, protected, key=calendar, by_id=False)
+        tz = self._default_tz(cals)
+        uid = str(uuid.uuid4()).upper()
+        ical = compose.new_event(changes, rule, tz, uid, self._now())
+        path = writer.create(cal, f"{uid}.ics", compose.to_text(ical))
+        [event] = [c for c in ical.subcomponents if c.name == "VEVENT"]
+        return self._written(cal, event, rule is not None, tz, path)
+
+    def _fresh(
+        self, event_id: str, protected: Sequence[str]
+    ) -> tuple[CalendarInfo, EventId, icalendar.Calendar, str, Any, dt.tzinfo]:
+        """For an update or delete: the writable calendar, the stored resource just read
+        from iCloud with its ETag (never one from an earlier call), the target in it, after
+        refusing anything that involves someone other than the account."""
+        from . import compose
+
+        try:
+            eid = decode_event_id(event_id)
+        except BadEventId as exc:
+            raise ToolInputError(str(exc)) from exc
+        cals = self._in_scope()
+        cal = self._writable(cals, protected, key=eid.calendar_id, by_id=True)
+        if not eid.path.startswith("/"):
+            raise ToolInputError("malformed event id")
+        self._check_resource_path(cal, eid)
+        tz = self._default_tz(cals)
+        addresses = self.client.account_addresses()
+        stored = self.client.event_resource(cal, eid.path)
+        if stored is None:
+            raise ToolInputError("event not found (deleted or moved); list events again")
+        text, etag = stored
+        try:
+            ical = icalendar.Calendar.from_ical(text)
+        except ValueError as exc:
+            raise ToolInputError("the stored event cannot be read; change it in Calendar") from exc
+        target = compose.find_target(ical, eid.start, tz)
+        if target is None:
+            raise ToolInputError("event not found (deleted or moved); list events again")
+        compose.check_people(ical, addresses)
+        return cal, eid, ical, etag, target, tz
+
+    def update_event(
+        self, event_id: str, *, changes: Changes, protected: Sequence[str] = ()
+    ) -> dict:
+        from . import compose
+
+        writer = self._require_writer()
+        compose.check_changes(changes, creating=False)
+        if changes == compose.Changes():
+            raise ToolInputError("nothing to change")
+        cal, eid, ical, etag, target, tz = self._fresh(event_id, protected)
+        changed = compose.apply_update(ical, target, changes, tz, self._now())
+        writer.update(cal, eid.path, compose.to_text(ical), etag)
+        recurring = changed.get("RECURRENCE-ID") is not None
+        return self._written(cal, changed, recurring, tz, eid.path)
+
+    def delete_event(self, event_id: str, *, protected: Sequence[str] = ()) -> dict:
+        from . import compose
+
+        writer = self._require_writer()
+        cal, eid, ical, etag, target, _ = self._fresh(event_id, protected)
+        kind = "event" if target.override is None and target.original is None else "occurrence"
+        if compose.apply_delete(ical, target, self._now()):
+            writer.delete(cal, eid.path, etag)
+        else:
+            writer.update(cal, eid.path, compose.to_text(ical), etag)
+        return {"deleted": kind, "calendar": cal.name}
