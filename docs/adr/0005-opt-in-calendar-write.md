@@ -31,7 +31,9 @@
 3. **Three tools, one event per call.** `calendar_event_create`, `calendar_event_update` and
    `calendar_event_delete`, for single or recurring events and for one occurrence of a series
    (an override by `RECURRENCE-ID`, or an `EXDATE`). Whole-series edit modes, creating or
-   deleting calendars, and invitations or replies are out of scope.
+   deleting calendars, and invitations or replies are out of scope. *(Amended 2026-10-14:
+   whole-series edits are decided in [ADR-0007](0007-calendar-series-edit.md), for one
+   separate tool; these three tools keep one event or occurrence per call.)*
 4. **No email to other people.** Because iCloud ignores `SCHEDULE-AGENT=CLIENT`, the tools
    take no attendees, and they refuse to update or delete any event that has an attendee other
    than the account itself, or that someone else organised. Every write sends

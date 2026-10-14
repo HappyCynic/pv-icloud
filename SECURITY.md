@@ -40,7 +40,10 @@ command other than those ADR-0004 lists.
 **Optional calendar write access** ([ADR-0005](docs/adr/0005-opt-in-calendar-write.md)).
 Writes need both `PV_ICLOUD_CALENDAR_WRITE=enabled` and
 `calendar_write: true` on the token. They create, update or delete one event (or one
-occurrence of a series) at a time, count against the token's hourly write limit, only in
+occurrence of a series) at a time, except `calendar_series_update`, which changes one whole
+series, or a series from a date, of at most 10 parts
+([ADR-0007](docs/adr/0007-calendar-series-edit.md)). They count against the token's hourly
+write limit, only in
 calendars the account may change (its own, and calendars shared with it read-write; never
 subscribed or read-only ones, never `protected_calendars`),
 always as conditional requests that cannot overwrite a change made elsewhere, and never with
@@ -48,7 +51,8 @@ attendees: iCloud emails invitations for any attendee, so events with attendees 
 the account cannot be changed through pv-icloud. These are vulnerabilities: a calendar write
 without the switch and the grant; a write to a calendar the rules above exclude; any write
 that makes iCloud email someone other than the account; any DAV method other than those
-ADR-0005 lists.
+ADR-0005 lists; a series edit that writes more than 10 resources, deletes a resource it did
+not create in the same call, or drops a changed occurrence without `drop_unmatched`.
 
 **Optional contact write access** ([ADR-0006](docs/adr/0006-opt-in-contact-write.md)).
 Writes need both `PV_ICLOUD_CONTACTS_WRITE=enabled` and a per-token grant (`create`,
