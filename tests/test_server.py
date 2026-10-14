@@ -21,7 +21,7 @@ from pv_icloud.server import Runtime, create_app
 
 from .conftest import TOKENS, make_config
 from .fakecaldav import FakeAccount, FakeCalDav, FakeCalendar, resource, vevent
-from .fakecarddav import FakeBook, FakeCardDav, vcard
+from .fakecarddav import FakeBook, FakeCardDav, group_card, vcard
 from .fakeimap import FakeServer, make_message
 
 HEADERS = {"accept": "application/json, text/event-stream", "content-type": "application/json"}
@@ -56,7 +56,8 @@ def app_env(tmp_path):
     yield from _app_env(make_config(tmp_path))
 
 
-def _app_env(config, smtp=None):
+def _app_env(config, smtp=None, alice_cards=None):
+    """`alice_cards`: more cards (file name -> vCard) in alice's address book."""
     ups = Upstreams()
     now = dt.datetime.now(dt.UTC)
     for user, subject in (
@@ -94,7 +95,8 @@ def _app_env(config, smtp=None):
                         f"{who}-friend",
                         f"EMAIL;type=INTERNET:{who}@example.com",
                         fn=f"{who} secret friend",
-                    )
+                    ),
+                    **((alice_cards or {}) if who == "alice" else {}),
                 },
             )
             for who, dsid in (("alice", "1"), ("bob", "2"))
@@ -1225,3 +1227,408 @@ def test_contacts_stay_read_only_with_every_grant(cal_env):
         args = {"query": "friend"} if tool == "find_person" else {}
         assert call_tool(client, token("both"), tool, args)["isError"] is False, tool
     assert {m for m, _ in runtime.carddav.requests} <= {"PROPFIND", "REPORT"}
+
+
+# --- contact writes (ADR-0006) ------------------------------------------------------------
+
+CONTACT_TOOLS = {"contacts_create", "contacts_update", "contacts_delete"}
+CONTACT_TOKENS = {
+    "editor": {"contacts_write": ["create", "update", "delete"]},
+    "updater": {"contacts_write": ["update"]},
+    "creator": {"contacts_write": ["create", "update"]},
+    "mixed": {
+        "contacts_write": ["update"],
+        "calendar_write": True,
+        "mail_write": ["draft"],
+        "max_writes_per_hour": 2,
+    },
+    "planner": {"calendar_write": True},
+    "scribe": {"mail_write": ["draft"]},
+}
+CONTACT_ARGS = {
+    "given_name": "Ann",
+    "family_name": "Lee",
+    "organization": "Widgets",
+    "phones": [{"label": "mobile", "value": "+1 312 555 0100"},
+               {"label": "Boat", "value": "+1 312 555 0101"}],
+    "emails": [{"label": "work", "value": "ann@widgets.example"}],
+    "note": "Likes tea",
+    "groups": ["Friends"],
+}  # fmt: skip
+CONTACT_SECRETS = (
+    "Ann", "Lee", "Widgets", "555 0100", "555 0101", "ann@widgets.example", "Likes tea",
+    "Friends", "mobile", "Boat",
+)  # fmt: skip
+
+
+@pytest.fixture
+def contacts_env(tmp_path):
+    config = make_config(
+        tmp_path,
+        mail_write=True,
+        calendar_write=True,
+        contacts_write=True,
+        alice_tokens=list(CONTACT_TOKENS.items()),
+        alice_contacts={"exclude_groups": ["Private"]},
+    )
+    cards = {
+        "g-friends.vcf": group_card("g-friends", "Friends", []),
+        "g-private.vcf": group_card("g-private", "Private", []),
+    }
+    yield from _app_env(config, alice_cards=cards)
+
+
+def alice_book(runtime) -> FakeBook:
+    return runtime.carddav.books["alice@icloud.com"]
+
+
+def contact_writes(runtime) -> list[str]:
+    return [f"{w.method} {w.path.rsplit('/', 1)[-1]}" for w in runtime.carddav.writes]
+
+
+def _assert_no_contact_content(line: dict, *more: str) -> None:
+    text = json.dumps(line)
+    for secret in (*CONTACT_SECRETS, *more):
+        assert secret not in text, secret
+
+
+def _imported_contact_write_modules(tmp_path, enabled: bool) -> list[str]:
+    code = (
+        "import sys\n"
+        "from pathlib import Path\n"
+        "from tests.conftest import make_config\n"
+        "from pv_icloud.server import Runtime, build_server\n"
+        f"cfg = make_config(Path({str(tmp_path)!r}), contacts_write={enabled})\n"
+        "build_server(Runtime(cfg, conn_factory=lambda: None, start_sync=False))\n"
+        "names = ('pv_icloud.contacts.carddav_write', 'pv_icloud.contacts.compose')\n"
+        "print(' '.join(n for n in names if n in sys.modules))\n"
+    )
+    root = Path(__file__).resolve().parent.parent
+    out = subprocess.run(
+        [sys.executable, "-c", code], cwd=root, capture_output=True, text=True, check=True
+    )
+    return out.stdout.split()
+
+
+def test_contact_write_modules_are_imported_only_when_switched_on(tmp_path):
+    assert _imported_contact_write_modules(tmp_path / "off", enabled=False) == []
+    assert _imported_contact_write_modules(tmp_path / "on", enabled=True) == [
+        "pv_icloud.contacts.carddav_write", "pv_icloud.contacts.compose",
+    ]  # fmt: skip
+
+
+def test_no_contact_write_tool_without_the_switch(cal_env):
+    client, runtime = cal_env  # mail and calendar writes on, contact writes off
+    tools = rpc(client, "tools/list", token=token("both")).json()["result"]["tools"]
+    assert not CONTACT_TOOLS & {t["name"] for t in tools}
+    out = call_tool(client, token("both"), "contacts_delete", {"id": "alice-friend"})
+    assert out["content"][0]["text"] == "Unknown tool: contacts_delete"
+    assert runtime.carddav.writes == []
+
+
+def test_contact_grants_list_their_tools(contacts_env):
+    client, runtime = contacts_env
+    assert surface(client, TOKENS["alice"]) == json.loads(SNAPSHOT.read_text())
+    snapshot = json.loads(SNAPSHOT.read_text())["tools"]
+    for label, expected in (
+        ("editor", CONTACT_TOOLS),
+        ("updater", {"contacts_update"}),
+        ("creator", {"contacts_create", "contacts_update"}),
+        ("mixed", {"contacts_update", "mail_draft"} | CALENDAR_TOOLS),
+        ("planner", CALENDAR_TOOLS),
+        ("scribe", {"mail_draft"}),
+    ):
+        tools = rpc(client, "tools/list", token=token(label)).json()["result"]["tools"]
+        assert {t["name"] for t in tools} == READ_TOOLS | expected, label
+        assert [t for t in tools if t["name"] in READ_TOOLS] == snapshot, label
+    tools = rpc(client, "tools/list", token=token("editor")).json()["result"]["tools"]
+    by_name = {t["name"]: t for t in tools}
+    for name, destructive in (
+        ("contacts_create", False),
+        ("contacts_update", True),
+        ("contacts_delete", True),
+    ):
+        assert by_name[name]["annotations"] == {
+            "readOnlyHint": False,
+            "destructiveHint": destructive,
+            "idempotentHint": False,
+            "openWorldHint": True,
+        }, name
+        assert by_name[name]["inputSchema"].get("additionalProperties") is False, name
+    assert by_name["contacts_delete"]["inputSchema"]["required"] == ["id"]
+    assert by_name["contacts_update"]["inputSchema"]["required"] == ["id"]
+    assert "required" not in by_name["contacts_create"]["inputSchema"]
+    create = by_name["contacts_create"]["inputSchema"]["properties"]
+    assert {"name", "groups_of", "is_me"}.isdisjoint(create) and "groups" in create
+    assert runtime.carddav.writes == []  # nothing is written at startup
+
+
+def test_ungranted_contact_tools_fail_like_unknown_ones(contacts_env):
+    client, runtime = contacts_env
+    runtime.carddav.requests.clear()
+    for label, tool, args in (
+        ("updater", "contacts_delete", {"id": "alice-friend"}),
+        ("updater", "contacts_create", {"given_name": "x"}),
+        ("planner", "contacts_update", {"id": "alice-friend", "title": "x"}),
+        ("scribe", "contacts_create", {"given_name": "x"}),
+        (None, "contacts_delete", {"id": "alice-friend"}),
+    ):
+        tok = TOKENS["alice"] if label is None else token(label)
+        out = call_tool(client, tok, tool, args)
+        assert out["content"][0]["text"] == f"Unknown tool: {tool}", (label, tool)
+    assert runtime.carddav.requests == []
+    # A contact grant grants no mail or calendar write.
+    out = call_tool(client, token("editor"), "mail_draft", {"subject": "x"})
+    assert out["content"][0]["text"] == "Unknown tool: mail_draft"
+    out = call_tool(client, token("editor"), "calendar_event_delete", {"id": "x"})
+    assert out["content"][0]["text"] == "Unknown tool: calendar_event_delete"
+
+
+def test_contact_create_update_delete_end_to_end(contacts_env, caplog):
+    client, runtime = contacts_env
+    with caplog.at_level(logging.INFO):
+        created = call_tool(client, token("editor"), "contacts_create", CONTACT_ARGS)
+        out = created["structuredContent"]
+        assert out["content_trust"] == "untrusted"
+        assert out["provenance"]["source"] == "icloud-contacts"
+        assert (out["name"], out["groups"]) == ("Ann Lee", ["Friends"])
+        cid = out["id"]
+        # Readable at once by every read tool.
+        got = call_tool(client, token("editor"), "contacts_get", {"id": cid})["structuredContent"]
+        assert [(p["label"], p["value"]) for p in got["phones"]] == [
+            ("mobile", "+1 312 555 0100"), ("Boat", "+1 312 555 0101"),
+        ]  # fmt: skip
+        people = call_tool(client, token("editor"), "find_person", {"query": "Ann Lee"})
+        assert people["structuredContent"]["people"][0]["contact_id"] == cid
+        updated = call_tool(
+            client,
+            token("editor"),
+            "contacts_update",
+            {
+                "id": cid,
+                "title": "Buyer",
+                "remove": {"phones": [{"label": "mobile", "value": "+1 312 555 0100"}]},
+                "add": {"phones": [{"label": "mobile", "value": "+1 312 555 0199"}]},
+                "remove_groups": ["Friends"],
+            },
+        )["structuredContent"]
+        assert updated["groups"] == []
+        found = call_tool(client, token("editor"), "contacts_search", {"query": "555 0199"})
+        assert [c["id"] for c in found["structuredContent"]["contacts"]] == [cid]
+        deleted = call_tool(client, token("editor"), "contacts_delete", {"id": cid})
+        assert deleted["structuredContent"]["deleted"] is True
+        gone = call_tool(client, token("editor"), "contacts_get", {"id": cid})
+        assert gone["isError"] is True
+    assert contact_writes(runtime) == [
+        f"PUT {cid}.vcf", "PUT g-friends.vcf", f"PUT {cid}.vcf", "PUT g-friends.vcf",
+        f"DELETE {cid}.vcf",
+    ]  # fmt: skip
+    assert runtime.carddav.write_attempts == []
+    lines = [x for x in audit_lines(caplog) if x["tool"] in CONTACT_TOOLS]
+    assert [(x["tool"], x["write"], x["outcome"]) for x in lines] == [
+        ("contacts_create", True, "ok"),
+        ("contacts_update", True, "ok"),
+        ("contacts_delete", True, "ok"),
+    ]
+    assert lines[0]["args"]["phones"] == "<2 items>"
+    assert lines[1]["args"]["add"] == "<set>" and lines[1]["args"]["remove"] == "<set>"
+    assert lines[1]["args"]["id"] == f"<{len(cid)} chars>"
+    for line in lines:
+        _assert_no_contact_content(line, cid, "555 0199")
+    for record in caplog.records:  # no log line carries contact content
+        message = record.getMessage()
+        assert "555 01" not in message and "Likes tea" not in message
+        # httpx names the card's path at INFO; configure_logging keeps only its warnings.
+        assert cid not in message or record.name == "httpx", record.name
+    # Group names are audited as lengths; reads of the new contact are not write lines.
+    assert all("write" not in x for x in audit_lines(caplog) if x["tool"] not in CONTACT_TOOLS)
+
+
+def test_request_urls_are_not_logged(monkeypatch):
+    from pv_icloud.server import configure_logging
+
+    for name in ("httpx", "httpcore"):
+        monkeypatch.setattr(logging.getLogger(name), "level", logging.NOTSET)
+    audit = logging.getLogger("pv_icloud.audit")
+    monkeypatch.setattr(audit, "handlers", list(audit.handlers))
+    configure_logging("INFO")
+    assert not logging.getLogger("httpx").isEnabledFor(logging.INFO)
+    assert not logging.getLogger("httpcore").isEnabledFor(logging.INFO)
+    assert logging.getLogger("httpx").isEnabledFor(logging.WARNING)
+
+
+def test_contact_refusals_are_audited_without_content(contacts_env, caplog):
+    client, runtime = contacts_env
+    cid = call_tool(client, token("editor"), "contacts_create", CONTACT_ARGS)["structuredContent"][
+        "id"
+    ]
+    book = alice_book(runtime)
+    name = f"{cid}.vcf"
+    runtime.carddav.before_write = lambda: book.put(name, book.cards[name].replace("Lee", "Li"))
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="pv_icloud.audit"):
+        stale = call_tool(
+            client,
+            token("editor"),
+            "contacts_update",
+            {"id": cid, "add": {"phones": [{"label": "Boat", "value": "+1 312 555 0102"}]}},
+        )
+        private = call_tool(
+            client, token("editor"), "contacts_update", {"id": cid, "add_groups": ["Private"]}
+        )
+        over = call_tool(client, token("editor"), "contacts_create", {"note": "Likes tea" * 3000})
+        hidden = call_tool(client, token("editor"), "contacts_delete", {"id": "g-friends"})
+        unknown = call_tool(client, token("editor"), "contacts_update", {"id": cid, "colour": "x"})
+    assert error(stale, "contacts_update") == "the contact changed in Contacts; read it again"
+    assert error(private, "contacts_update") == "unknown group: Private"
+    assert "note" in error(over, "contacts_create")
+    assert "contact not found" in error(hidden, "contacts_delete")
+    assert unknown["isError"] is True  # an argument the tool does not have is refused
+    lines = audit_lines(caplog)
+    assert [(x["tool"], x["write"], x["outcome"]) for x in lines] == [
+        ("contacts_update", True, "invalid"),
+        ("contacts_update", True, "invalid"),
+        ("contacts_create", True, "invalid"),
+        ("contacts_delete", True, "invalid"),
+    ]
+    for line in lines:
+        _assert_no_contact_content(line, cid, "Private", "555 0102")
+
+
+def test_contact_part_way_failure_is_audited(contacts_env, caplog):
+    client, runtime = contacts_env
+    args = {**CONTACT_ARGS, "groups": []}
+    cid = call_tool(client, token("editor"), "contacts_create", args)["structuredContent"]["id"]
+    book = alice_book(runtime)
+
+    def second():
+        book.put("g-friends.vcf", book.cards["g-friends.vcf"].replace("Friends;", "Friends2;"))
+
+    runtime.carddav.before_write = lambda: setattr(runtime.carddav, "before_write", second)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="pv_icloud.audit"):
+        out = call_tool(
+            client,
+            token("editor"),
+            "contacts_update",
+            {"id": cid, "title": "CEO", "add_groups": ["Friends"]},
+        )
+    assert error(out, "contacts_update") == (
+        "the contact was saved and added to 0 of 1 groups; group Friends changed in Contacts; "
+        "read the contact again"
+    )
+    [line] = audit_lines(caplog)
+    assert (line["write"], line["outcome"]) == (True, "invalid")
+    _assert_no_contact_content(line, cid)
+    got = call_tool(client, token("editor"), "contacts_get", {"id": cid})["structuredContent"]
+    assert got["title"] == "CEO" and got["groups"] == []
+
+
+def test_all_writes_share_the_hourly_limit(contacts_env, caplog):
+    client, runtime = contacts_env
+    cid = call_tool(client, token("editor"), "contacts_create", CONTACT_ARGS)["structuredContent"][
+        "id"
+    ]
+    assert call_tool(client, token("mixed"), "mail_draft", {"subject": "x"})["isError"] is False
+    # One call with a field change and a group change counts once.
+    out = call_tool(
+        client,
+        token("mixed"),
+        "contacts_update",
+        {"id": cid, "title": "x", "remove_groups": ["Friends"]},
+    )
+    assert out["isError"] is False and contact_writes(runtime)[-2:] == [
+        f"PUT {cid}.vcf", "PUT g-friends.vcf",
+    ]  # fmt: skip
+    runtime.carddav.requests.clear()
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="pv_icloud.audit"):
+        out = call_tool(client, token("mixed"), "contacts_update", {"id": cid, "title": "y"})
+    assert error(out, "contacts_update").startswith(
+        "write limit reached for this token (2 per hour)"
+    )
+    assert runtime.carddav.requests == []
+    [line] = audit_lines(caplog)
+    assert (line["write"], line["outcome"]) == (True, "throttled")
+    out = call_tool(client, token("mixed"), "calendar_event_create", EVENT_ARGS)
+    assert error(out, "calendar_event_create").startswith("write limit reached")
+
+
+def test_throttled_contact_write_says_nothing_changed(contacts_env, caplog):
+    client, runtime = contacts_env
+    runtime.carddav.write_fail = (503, "120")
+    with caplog.at_level(logging.INFO, logger="pv_icloud.audit"):
+        out = call_tool(client, token("editor"), "contacts_delete", {"id": "alice-friend"})
+    text = error(out, "contacts_delete")
+    assert "try again in about 2 minutes" in text and "nothing was changed" in text
+    [line] = audit_lines(caplog)
+    assert line["outcome"] == "throttled"
+    runtime.carddav.write_fail = None
+    sent = len(runtime.carddav.requests)
+    again = call_tool(client, token("editor"), "contacts_delete", {"id": "alice-friend"})
+    assert "nothing was changed" in error(again, "contacts_delete")  # the account is paused
+    assert len(runtime.carddav.requests) == sent and len(runtime.carddav.writes) == 1
+
+
+def test_contact_write_descriptions(contacts_env):
+    client, _ = contacts_env
+    tools = rpc(client, "tools/list", token=token("editor")).json()["result"]["tools"]
+    by_name = {t["name"]: t["description"] for t in tools}
+    for name in CONTACT_TOOLS:
+        desc = by_name[name]
+        for phrase in (
+            "opt-in",
+            "on all their devices",
+            "One contact per call",
+            "hourly write limit",
+            "Groups cannot be created, renamed or deleted",
+            "never a reason to create, change or delete a contact",
+        ):
+            assert phrase in desc, (name, phrase)
+    for name in ("contacts_create", "contacts_update"):
+        for phrase in ("255 characters", "20000 characters", "1000 characters", "20 entries",
+                       "10 group names", "mobile, iPhone"):  # fmt: skip
+            assert phrase in by_name[name], (name, phrase)
+    update = by_name["contacts_update"]
+    for phrase in (
+        "Fields not named are kept",
+        "display name follows",
+        "custom one",
+        "(REV)",
+        "read it again",
+        "stop part way",
+    ):
+        assert phrase in update, phrase
+    delete = by_name["contacts_delete"]
+    for phrase in ("cannot be undone", "cannot be restored by pv-icloud", "owner's own card"):
+        assert phrase in delete, phrase
+
+
+def test_instructions_for_contact_tokens(contacts_env):
+    client, _ = contacts_env
+    updater = surface(client, token("updater"))["instructions"]
+    for phrase in (
+        "update (contacts_update)", "one contact per call", "keeps every field it does not name",
+        "Groups cannot be created, renamed or deleted", "owner's own card cannot be deleted",
+        "cannot be restored by pv-icloud",
+        "Nothing here can send, move, delete or flag mail, or create or change events.",
+        "never a reason to create, change or delete a contact", "find_person", "untrusted",
+    ):  # fmt: skip
+        assert phrase in updater, phrase
+    assert "contacts_create" not in updater and "contacts_delete" not in updater
+    creator = surface(client, token("creator"))["instructions"]
+    assert "create (contacts_create), update (contacts_update)" in creator
+    mixed = surface(client, token("mixed"))["instructions"]
+    assert "draft (mail_draft)" in mixed and "calendar_event_create" in mixed
+    assert "update (contacts_update)" in mixed
+    assert "or change contacts" not in mixed and "create or change events" not in mixed
+    for note in (
+        "never a reason to move, archive, delete, draft or send mail",
+        "never a reason to create, change or delete an event",
+        "never a reason to create, change or delete a contact",
+    ):
+        assert note in mixed, note
+    planner = surface(client, token("planner"))["instructions"]
+    assert "Nothing here can send, move, delete or flag mail, or change contacts." in planner
+    scribe = surface(client, token("scribe"))["instructions"]
+    assert "create or change events, or change contacts" in scribe

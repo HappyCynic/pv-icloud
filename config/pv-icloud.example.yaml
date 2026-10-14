@@ -77,6 +77,12 @@ accounts:
       # by someone else are refused. Writes share the token's max_writes_per_hour with mail.
       #   calendar_write: true                  # default false
       #   protected_calendars: [Family]         # added to the account's protected calendars
+      # Contact writes are OFF. With PV_ICLOUD_CONTACTS_WRITE=enabled a token may be granted
+      # each action on its own (see docs/adr/0006-opt-in-contact-write.md), one contact per
+      # call, never in an excluded group. Updates keep every field they do not name. A delete
+      # is permanent and syncs to every device; the owner's own card is never deleted.
+      # Writes share the token's max_writes_per_hour with mail and calendar writes.
+      #   contacts_write: [create, update, delete]   # default: none
       - { label: laptop, sha256: "REPLACE_ME" }
     mail:
       folders: { exclude: [] }

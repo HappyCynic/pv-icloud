@@ -9,8 +9,8 @@ that lets MCP clients (Claude Code, Claude Desktop, …) search and read **iClou
 **Calendar** and **Contacts**. One server can serve several iCloud accounts; each bearer token
 maps to exactly one account. Moving, archiving and deleting mail can be switched on per
 deployment and granted per token ([Mail writes](#mail-writes-opt-in)), and so can creating,
-changing and deleting calendar events ([Calendar writes](#calendar-writes-opt-in)); Contacts
-are always read-only.
+changing and deleting calendar events ([Calendar writes](#calendar-writes-opt-in)) and
+contacts ([Contact writes](#contact-writes-opt-in)).
 
 > **Status:** early. Mail, calendar and contacts tools work against real iCloud. Interfaces may change
 > before 1.0.
@@ -34,9 +34,9 @@ are always read-only.
 | `contacts_get` | One contact: names, emails, phones and addresses with labels, birthday, dates, related names, social profiles, groups, note |
 | `contacts_groups` | Contact groups with member counts |
 
-Unless [mail writes](#mail-writes-opt-in) or [calendar writes](#calendar-writes-opt-in) are
-switched on and granted, there are **no** tools that send, move, delete or flag mail, change
-events or change contacts. The IMAP read path never issues write commands (folders are opened
+Unless [mail writes](#mail-writes-opt-in), [calendar writes](#calendar-writes-opt-in) or
+[contact writes](#contact-writes-opt-in) are switched on and granted, there are **no** tools
+that send, move, delete or flag mail, change events or change contacts. The IMAP read path never issues write commands (folders are opened
 with `EXAMINE` and messages fetched with `BODY.PEEK`, so read state never changes), and the
 CalDAV and CardDAV read clients can only send `PROPFIND` and `REPORT`.
 
@@ -140,8 +140,54 @@ saw before.
 Out of scope: attendees, moving an event to another calendar, editing or deleting a whole
 series at once ("this and following"), creating or deleting calendars, and Reminders.
 
+### Contact writes (opt-in)
+
+Off unless the deployment sets `PV_ICLOUD_CONTACTS_WRITE=enabled` **and** a token lists the
+action in `contacts_write` ([ADR-0006](docs/adr/0006-opt-in-contact-write.md)). Each action
+is granted on its own, because a delete is permanent; the switch is independent of the mail
+and calendar ones, and a token without `contacts_write` sees exactly the tools it saw before.
+
+| Tool | Grant | Purpose |
+|---|---|---|
+| `contacts_create` | `create` | Create one contact with any field `contacts_get` shows (names, company, title, emails, phones, addresses, URLs, social profiles, instant messaging, birthday, dates, related names, note), with labels, optionally in existing groups |
+| `contacts_update` | `update` | Change, add or remove individual fields of one contact, and add it to or remove it from existing groups |
+| `contacts_delete` | `delete` | Delete one contact. **Permanent:** iCloud keeps no per-contact trash, and the delete reaches every device. |
+
+- **Lossless updates.** The stored vCard is edited in place: only the lines a call changes
+  are rewritten, and every other line (the photo, Apple's labels, related names, unknown
+  properties) stays byte for byte. Two more lines change on their own, as Apple's apps do:
+  `REV` (the revision time), and the display name when a name part changes, unless it was a
+  custom one. Anything that cannot be applied unambiguously (say, a card with two notes when
+  the call changes the note) is refused with `cannot change this contact safely` and nothing
+  is written.
+- **Changing a value:** `remove` takes the value as `contacts_get` returned it, `add` the new
+  one, in the same call.
+- **Labels** are written as Apple Contacts writes them (`TEL;TYPE=CELL;TYPE=VOICE` for
+  `mobile`, an item group with `X-ABLabel` for custom labels), so they read back the same.
+- **Groups** are changed by editing the group's card, losslessly; groups are never created,
+  renamed or deleted. Contacts in `contacts.exclude_groups` cannot be read, so they cannot be
+  written either (`contact not found`), and an excluded group gives `unknown group`, like a
+  missing one. The owner's own card (the me-card) can be updated but never deleted.
+- **Safe with other devices:** before every update and delete the card (and any group card the
+  call changes) is read again, and the write is conditional on it not having changed since
+  (`If-Match`). If it changed in Contacts in between, the call fails with `the contact changed
+  in Contacts; read it again`. Group changes are separate writes after the contact's, so a
+  call can stop part way; the error then says what was saved. Nothing is retried.
+- **Seen at once:** the address book is refreshed right after a write, so `contacts_search`,
+  `contacts_get` and `find_person` show the change on the next call.
+- **Limits:** one contact per call; name fields and title up to 255 characters, note 20,000,
+  other values 1000, labels 100; at most 20 entries per list (create) or in `add` and `remove`
+  together (update); at most 10 group names per call. The token's `max_writes_per_hour`
+  counts mail, calendar and contact writes together.
+- Write calls are audited with `"write": true` and no contact content: no id, name, number,
+  address, email, note, label or group name.
+
+Out of scope: creating, renaming or deleting groups, photos, merging duplicates, switching a
+card between person and company, and batch changes.
+
 **Contacts** are kept in memory only (never written to disk): the first call (or startup)
-loads the address book, and later calls fetch only what changed, at most once a minute.
+loads the address book, and later calls fetch only what changed, at most once a minute (and
+right after a contact write).
 `find_person` joins them with the local mail index, so it answers in milliseconds. It does
 not read calendars; for meetings with someone, use `calendar_search`.
 
@@ -267,7 +313,8 @@ Per token (under `accounts[].tokens[]`, besides `label` and `sha256`):
 | `protected_folders` | `[]` | Added to the account's protected folders for this token only |
 | `calendar_write` | `false` | `true`: this token may create, change and delete events. Needs `PV_ICLOUD_CALENDAR_WRITE=enabled`, otherwise startup fails |
 | `protected_calendars` | `[]` | Added to the account's protected calendars for this token only |
-| `max_writes_per_hour` | `30` | This token's write limit for mail and calendar writes together (sliding hour, held in memory) |
+| `contacts_write` | `[]` | Contact write actions this token may use: `create`, `update`, `delete`. Needs `PV_ICLOUD_CONTACTS_WRITE=enabled` and `contacts.enabled: true`, otherwise startup fails |
+| `max_writes_per_hour` | `30` | This token's write limit for mail, calendar and contact writes together (sliding hour, held in memory) |
 | `send_to` | unset (anyone) | Only with `send`: the recipients `mail_send` may reach, as bare addresses or `@domain` entries. Unset: anyone, with a startup warning |
 
 Environment: `PV_ICLOUD_CONFIG` (config path), `PV_ICLOUD_DATA_DIR` (index root),
@@ -275,7 +322,7 @@ Environment: `PV_ICLOUD_CONFIG` (config path), `PV_ICLOUD_DATA_DIR` (index root)
 `0.0.0.0`; any non-loopback address logs a plain-HTTP warning at startup),
 `PV_ICLOUD_LOG_LEVEL`, `PV_ICLOUD_MAIL_WRITE` (`enabled` turns mail writes on; unset, empty
 or `disabled` leaves them off; any other value is a config error), `PV_ICLOUD_CALENDAR_WRITE`
-(the same for calendar writes).
+and `PV_ICLOUD_CONTACTS_WRITE` (the same for calendar and contact writes).
 
 ## Resources and backups
 

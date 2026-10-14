@@ -231,6 +231,7 @@ def write_config(
     tokens=None,
     calendar=None,
     calendar_defaults=None,
+    contacts=None,
 ):
     """One account `x` with token `agent` (plus `token` keys) for the write-config tests."""
     raw = {
@@ -241,6 +242,7 @@ def write_config(
                 "tokens": tokens or [{"label": "agent", "sha256": "0" * 64, **(token or {})}],
                 "mail": mail or {},
                 "calendar": calendar or {},
+                "contacts": contacts or {},
             }
         ],
     }
@@ -633,6 +635,109 @@ class TestCalendarWriteConfig:
         assert laptop.mail_write == frozenset()
 
 
+CONTACTS_ON = {"PV_ICLOUD_CONTACTS_WRITE": "enabled"}
+
+
+class TestContactsWriteSwitch:
+    """`PV_ICLOUD_CONTACTS_WRITE` (add-contacts-write, ADR-0006)."""
+
+    @pytest.mark.parametrize("value", [None, "", "disabled"])
+    def test_off_values(self, tmp_path, value):
+        env = {} if value is None else {"PV_ICLOUD_CONTACTS_WRITE": value}
+        assert write_config(tmp_path, env=env).contacts_write is False
+
+    def test_enabled(self, tmp_path):
+        assert write_config(tmp_path, env=CONTACTS_ON).contacts_write is True
+
+    @pytest.mark.parametrize("value", ["true", "Enabled", "on", "yes"])
+    def test_other_values_are_an_error(self, tmp_path, value):
+        with pytest.raises(ConfigError, match="PV_ICLOUD_CONTACTS_WRITE must be `enabled` or"):
+            write_config(tmp_path, env={"PV_ICLOUD_CONTACTS_WRITE": value})
+
+    def test_grant_without_the_switch(self, tmp_path):
+        with pytest.raises(ConfigError) as err:
+            write_config(tmp_path, env=CAL_ON, token={"contacts_write": ["update"]})
+        for part in ("account x", "'agent'", "contacts_write", "PV_ICLOUD_CONTACTS_WRITE"):
+            assert part in str(err.value)
+
+    def test_grant_with_contacts_turned_off(self, tmp_path):
+        with pytest.raises(ConfigError) as err:
+            write_config(
+                tmp_path,
+                env=CONTACTS_ON,
+                token={"contacts_write": ["create"]},
+                contacts={"enabled": False},
+            )
+        for part in ("account x", "'agent'", "contacts_write", "contacts.enabled"):
+            assert part in str(err.value)
+        # Without a grant, contacts may be off with the switch on.
+        cfg = write_config(tmp_path, env=CONTACTS_ON, contacts={"enabled": False})
+        assert cfg.account("x").contacts.enabled is False
+
+    def test_switches_are_independent(self, tmp_path):
+        cfg = write_config(tmp_path, env=CONTACTS_ON, token={"contacts_write": ["delete"]})
+        assert (cfg.mail_write, cfg.calendar_write, cfg.contacts_write) == (False, False, True)
+        cfg = write_config(tmp_path, env={**WRITE_ON, **CAL_ON}, token={"calendar_write": True})
+        assert (cfg.mail_write, cfg.calendar_write, cfg.contacts_write) == (True, True, False)
+        with pytest.raises(ConfigError, match="PV_ICLOUD_CALENDAR_WRITE"):
+            write_config(tmp_path, env=CONTACTS_ON, token={"calendar_write": True})
+        with pytest.raises(ConfigError, match="PV_ICLOUD_MAIL_WRITE"):
+            write_config(tmp_path, env=CONTACTS_ON, token={"mail_write": ["draft"]})
+
+    def test_empty_grant_needs_no_switch(self, tmp_path):
+        [tok] = write_config(tmp_path, env={}, token={"contacts_write": []}).account("x").tokens
+        assert tok.contacts_write == frozenset()
+
+
+class TestContactsWriteConfig:
+    def test_token_defaults(self, tmp_path):
+        [tok] = write_config(tmp_path, env={}).account("x").tokens
+        assert tok.contacts_write == frozenset()
+        assert tok.max_writes_per_hour == 30
+
+    @pytest.mark.parametrize(
+        "actions",
+        [["create"], ["update", "delete"], ["create", "update", "delete"], ["update", "update"]],
+    )
+    def test_token_actions(self, tmp_path, actions):
+        token = {"contacts_write": actions}
+        [tok] = write_config(tmp_path, env=CONTACTS_ON, token=token).account("x").tokens
+        assert tok.contacts_write == frozenset(actions)
+        assert tok.mail_write == frozenset() and tok.calendar_write is False
+
+    @pytest.mark.parametrize(
+        ("token", "parts"),
+        [
+            ({"contacts_write": True}, ["contacts_write", "list"]),
+            ({"contacts_write": "update"}, ["contacts_write", "list"]),
+            ({"contacts_write": [1]}, ["contacts_write", "list"]),
+            (
+                {"contacts_write": ["update", "merge"]},
+                ["contacts_write", "merge", "create, update, delete"],
+            ),
+        ],
+    )
+    def test_token_key_validated(self, tmp_path, token, parts):
+        with pytest.raises(ConfigError) as err:
+            write_config(tmp_path, env=CONTACTS_ON, token=token)
+        for part in ["account x", "'agent'", *parts]:
+            assert part in str(err.value)
+
+    def test_tokens_of_one_account_resolve_to_their_own_contact_permissions(self, tmp_path):
+        tokens = [
+            {"label": "laptop", "sha256": sha("laptop"), "contacts_write": ["update", "delete"]},
+            {"label": "agent", "sha256": sha("agent"), "contacts_write": ["update"]},
+            {"label": "phone", "sha256": sha("phone")},
+        ]
+        table = TokenTable(write_config(tmp_path, env=CONTACTS_ON, tokens=tokens))
+        laptop, agent, phone = (table.resolve(x) for x in ("laptop", "agent", "phone"))
+        assert laptop is not None and agent is not None and phone is not None
+        assert laptop.contacts_write == frozenset({"update", "delete"})
+        assert agent.contacts_write == frozenset({"update"})
+        assert phone.contacts_write == frozenset()
+        assert laptop.calendar_write is False and laptop.mail_write == frozenset()
+
+
 class TestWriteLimiter:
     @pytest.fixture
     def clock(self):
@@ -723,6 +828,12 @@ def test_example_config_is_valid(tmp_path):
     assert all(not t.calendar_write for a in cfg.accounts for t in a.tokens)
     on = parse_config(raw, {**env, "PV_ICLOUD_CALENDAR_WRITE": "enabled"}, tmp_path)
     assert on.calendar_write and on.accounts[0].calendar.write.protected_calendars == ()
+    assert cfg.contacts_write is False
+    assert all(not t.contacts_write for a in cfg.accounts for t in a.tokens)
+    on = parse_config(raw, {**env, "PV_ICLOUD_CONTACTS_WRITE": "enabled"}, tmp_path)
+    assert on.contacts_write is True
+    # The commented-out grant in the example is one a token could use as written.
+    assert "contacts_write: [create, update, delete]" in text
 
 
 def test_per_account_limits_in_descriptions():

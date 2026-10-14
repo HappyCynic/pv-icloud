@@ -34,12 +34,39 @@ each version.
     again`. Nothing is retried.
   - Calendar writes count against the token's `max_writes_per_hour`, together with mail
     writes, and are audited with `"write": true` and no event content (not even times).
+- Opt-in contact writes ([ADR-0006](docs/adr/0006-opt-in-contact-write.md)), off by default:
+  - Deployment switch `PV_ICLOUD_CONTACTS_WRITE=enabled`, independent of the mail and
+    calendar switches. Without it nothing changes: the write code is not loaded, and a token
+    with `contacts_write` is a config error.
+  - Per-token `contacts_write: [create, update, delete]`, each action granted on its own
+    (default: none); a grant on an account with `contacts.enabled: false` is a config error.
+    A token without it sees exactly the tools and instructions it saw before.
+  - `contacts_create`: one contact with any field `contacts_get` shows, with labels written
+    as Apple Contacts writes them, optionally in existing groups.
+  - `contacts_update`: changes, adds (`add`) or removes (`remove`) fields of one contact, and
+    adds it to or removes it from existing groups. The stored card is edited in place: every
+    line the call does not change, the photo included, stays byte for byte; only `REV` and a
+    display name derived from the old name change along. Anything ambiguous is refused with
+    `cannot change this contact safely`.
+  - `contacts_delete`: deletes one contact, permanently. Never the account owner's own card.
+  - Groups are never created, renamed or deleted; contacts in excluded groups stay
+    invisible to writes (`contact not found`), and excluded groups give `unknown group`.
+  - Every update and delete re-reads the cards it changes and is conditional on them being
+    unchanged; a contact changed in Contacts meanwhile fails with `the contact changed in
+    Contacts; read it again`. Nothing is retried.
+  - The address book is refreshed right after a write, so `contacts_search`, `contacts_get`
+    and `find_person` show the change at once.
+  - Contact writes count against the token's `max_writes_per_hour`, together with mail and
+    calendar writes, and are audited with `"write": true` and no contact content.
 
 ### Fixed
 
 - Calendar tools now show the account's own address as the organiser's or an attendee's
   `email`. iCloud stores it as the account's principal path with the address in an `EMAIL=`
   parameter, which was shown as `email: null`; `calendar_search` finds it too.
+- The log no longer has httpx's `HTTP Request:` lines at the default `INFO` level. They named
+  every request URL, including subscribed calendar feed URLs, which often hold a private
+  token, and the path of each event or card written. httpx warnings are still logged.
 
 ## [0.2.0] - 2026-10-13
 

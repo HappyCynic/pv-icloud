@@ -44,6 +44,11 @@ SEND_TO_DOMAIN_RE = re.compile(rf"^@{_DOMAIN}$")
 CALENDAR_WRITE_ENV = "PV_ICLOUD_CALENDAR_WRITE"
 _CALENDAR_WRITE_KEYS = ("protected_calendars",)
 
+# Contact writes (docs/adr/0006-opt-in-contact-write.md): off unless this is `enabled`, then
+# granted per token and per action (delete is permanent, so it is its own grant).
+CONTACTS_WRITE_ENV = "PV_ICLOUD_CONTACTS_WRITE"
+CONTACTS_WRITE_ACTIONS = ("create", "update", "delete")
+
 
 class ConfigError(Exception):
     pass
@@ -127,6 +132,7 @@ class TokenEntry:
     send_to: tuple[str, ...] | None = None
     calendar_write: bool = False  # calendar_event_create/update/delete (ADR-0005)
     protected_calendars: tuple[str, ...] = ()  # added to the account's protected calendars
+    contacts_write: frozenset[str] = frozenset()  # granted actions from CONTACTS_WRITE_ACTIONS
 
 
 @dataclass(frozen=True)
@@ -146,6 +152,7 @@ class Config:
     data_dir: Path
     mail_write: bool = False  # PV_ICLOUD_MAIL_WRITE=enabled
     calendar_write: bool = False  # PV_ICLOUD_CALENDAR_WRITE=enabled
+    contacts_write: bool = False  # PV_ICLOUD_CONTACTS_WRITE=enabled
 
     def account(self, account_id: str) -> AccountConfig:
         for acct in self.accounts:
@@ -228,17 +235,21 @@ def _switch(env: Mapping[str, str], name: str) -> bool:
     return value == "enabled"
 
 
-def _token(t: Mapping[str, Any], label: str, digest: str, where: str) -> TokenEntry:
-    where = f"{where}: token {label!r}"
-    actions = t.get("mail_write", [])
+def _actions(t: Mapping[str, Any], key: str, allowed: tuple[str, ...], where: str) -> list[str]:
+    actions = t.get(key, [])
     if not isinstance(actions, list) or not all(isinstance(a, str) for a in actions):
-        raise ConfigError(f"{where} mail_write must be a list of actions")
-    unknown = [a for a in actions if a not in MAIL_WRITE_ACTIONS]
+        raise ConfigError(f"{where} {key} must be a list of actions; allowed: {', '.join(allowed)}")
+    unknown = [a for a in actions if a not in allowed]
     if unknown:
         raise ConfigError(
-            f"{where} mail_write: unknown action(s) {', '.join(unknown)}; "
-            f"allowed: {', '.join(MAIL_WRITE_ACTIONS)}"
+            f"{where} {key}: unknown action(s) {', '.join(unknown)}; allowed: {', '.join(allowed)}"
         )
+    return actions
+
+
+def _token(t: Mapping[str, Any], label: str, digest: str, where: str) -> TokenEntry:
+    where = f"{where}: token {label!r}"
+    actions = _actions(t, "mail_write", MAIL_WRITE_ACTIONS, where)
     return TokenEntry(
         label=label,
         sha256=digest,
@@ -252,6 +263,7 @@ def _token(t: Mapping[str, Any], label: str, digest: str, where: str) -> TokenEn
         protected_calendars=_names(
             t.get("protected_calendars", []), f"{where} protected_calendars", "calendar"
         ),
+        contacts_write=frozenset(_actions(t, "contacts_write", CONTACTS_WRITE_ACTIONS, where)),
     )
 
 
@@ -324,6 +336,7 @@ def _calendar_write(defaults: Any, account: Any, where: str) -> CalendarWriteCon
 def parse_config(raw: Mapping[str, Any], env: Mapping[str, str], data_dir: Path) -> Config:
     mail_write = _switch(env, MAIL_WRITE_ENV)
     calendar_write = _switch(env, CALENDAR_WRITE_ENV)
+    contacts_write = _switch(env, CONTACTS_WRITE_ENV)
     defaults = raw.get("defaults") or {}
     accounts_raw = raw.get("accounts") or []
     if not isinstance(accounts_raw, list) or not accounts_raw:
@@ -361,6 +374,11 @@ def parse_config(raw: Mapping[str, Any], env: Mapping[str, str], data_dir: Path)
             if token.calendar_write and not calendar_write:
                 raise ConfigError(
                     f"{where}: token {label!r} has calendar_write but {CALENDAR_WRITE_ENV} is "
+                    "not `enabled`; set it or remove the grant"
+                )
+            if token.contacts_write and not contacts_write:
+                raise ConfigError(
+                    f"{where}: token {label!r} has contacts_write but {CONTACTS_WRITE_ENV} is "
                     "not `enabled`; set it or remove the grant"
                 )
             tokens.append(token)
@@ -426,6 +444,12 @@ def parse_config(raw: Mapping[str, Any], env: Mapping[str, str], data_dir: Path)
             enabled=_bool(contacts_raw.get("enabled", True), f"{where}.contacts.enabled"),
             exclude_groups=tuple(exclude_groups),
         )
+        for token in tokens:
+            if token.contacts_write and not contacts.enabled:
+                raise ConfigError(
+                    f"{where}: token {token.label!r} has contacts_write but contacts.enabled "
+                    "is false; turn contacts on or remove the grant"
+                )
 
         prefix = f"PV_ICLOUD_{acct_id.upper()}_"
         user = env.get(prefix + "ICLOUD_USER", "").strip()
@@ -450,6 +474,7 @@ def parse_config(raw: Mapping[str, Any], env: Mapping[str, str], data_dir: Path)
         data_dir=data_dir,
         mail_write=mail_write,
         calendar_write=calendar_write,
+        contacts_write=contacts_write,
     )
 
 

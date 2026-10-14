@@ -12,11 +12,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 OWNER = "@mwklein"
-# Owned before they exist: the module allowed to change contacts (ADR-0006), created by its
-# change. Remove a path from here once it exists.
-PLANNED_PATHS: set[str] = {
-    "/src/pv_icloud/contacts/carddav_write.py",
-}
+# Owned before they exist: a module a change will create. Remove a path from here once it
+# exists.
+PLANNED_PATHS: set[str] = set()
 
 
 def _codeowners() -> dict[str, list[str]]:
@@ -386,18 +384,23 @@ def test_dav_sends_only_propfind_and_report() -> None:
                 assert _const(call.args[0]) in READ_METHODS, f"{path.name}:{call.lineno}"
 
 
-# --- CalDAV write methods (ADR-0005) -------------------------------------------------------
+# --- CalDAV and CardDAV write methods (ADR-0005, ADR-0006) ---------------------------------
 
 SRC = ROOT / "src" / "pv_icloud"
 CALDAV_WRITE = SRC / "cal" / "caldav_write.py"
+CARDDAV_WRITE = SRC / "contacts" / "carddav_write.py"
+# The only modules that may send PUT or DELETE (by file name: the checks also run on
+# snippets written to a temporary directory).
+_WRITE_MODULES = frozenset({CALDAV_WRITE.name, CARDDAV_WRITE.name})
 _DAV_WRITES = frozenset({"PUT", "DELETE"})
 _DAV_FORBIDDEN = frozenset({"MKCALENDAR", "MKCOL", "PROPPATCH", "MOVE", "COPY", "ACL", "LOCK"})
 _HTTP_ANY = frozenset({"GET", "HEAD", "POST", "PATCH", "OPTIONS"}) | _DAV_WRITES | _DAV_FORBIDDEN
 # httpx shortcuts that send a write method; flagged on any receiver whose name ends in http.
 _HTTP_WRITE_CALLS = frozenset({"put", "post", "patch", "delete"})
 # Modules that may pass a method held in a variable: each checks it against its own list.
-_METHOD_VARIABLE_OK = frozenset({"dav.py", "caldav_write.py"})
+_METHOD_VARIABLE_OK = frozenset({"dav.py"}) | _WRITE_MODULES
 _SCHEDULING_PROPS = ("ORGANIZER", "ATTENDEE")
+_PHOTO_LINE = re.compile(r"(?i)^([\w-]+\.)?PHOTO([;:]|$)")
 
 
 def _dav_files() -> list[Path]:
@@ -411,9 +414,10 @@ def _receiver_name(call: ast.Call) -> str:
 
 
 def _http_method_violations(path: Path, *, dav: bool) -> list[str]:
-    """`PUT` and `DELETE` only in caldav_write.py; no other DAV write method anywhere in the
-    DAV modules; HTTP requests name their method as a literal (or a checked variable)."""
-    in_write = path.name == CALDAV_WRITE.name
+    """`PUT` and `DELETE` only in the two write modules; no other DAV write method anywhere in
+    the DAV modules; HTTP requests name their method as a literal (or a checked variable)."""
+    in_write = path.name in _WRITE_MODULES
+    outside = "outside caldav_write.py and carddav_write.py"
     tree = ast.parse(path.read_text(), filename=str(path))
     out: list[str] = []
     for node in ast.walk(tree):
@@ -426,7 +430,7 @@ def _http_method_violations(path: Path, *, dav: bool) -> list[str]:
                     if path.name not in _METHOD_VARIABLE_OK:
                         out.append(f"{where}: HTTP method must be a string literal")
                 elif verb in _DAV_WRITES and not in_write:
-                    out.append(f"{where}: {verb} outside {CALDAV_WRITE.name}")
+                    out.append(f"{where}: {verb} {outside}")
                 elif verb not in _DAV_WRITES and verb not in {"PROPFIND", "REPORT", "GET"}:
                     out.append(f"{where}: HTTP {verb} is forbidden")
             elif method in _HTTP_WRITE_CALLS and _receiver_name(node).endswith("http"):
@@ -435,7 +439,34 @@ def _http_method_violations(path: Path, *, dav: bool) -> list[str]:
             if verb in _DAV_FORBIDDEN or verb == "POST":
                 out.append(f"{where}: DAV method {verb} is forbidden")
             elif verb in _DAV_WRITES and not in_write:
-                out.append(f"{where}: {verb} outside {CALDAV_WRITE.name}")
+                out.append(f"{where}: {verb} {outside}")
+    return out
+
+
+def _photo_violations(path: Path) -> list[str]:
+    """No contacts module builds a PHOTO line (ADR-0006: photos are never edited)."""
+    tree = ast.parse(path.read_text(), filename=str(path))
+    return [
+        f"{path.name}:{node.lineno}: builds a PHOTO line"
+        for node in ast.walk(tree)
+        if (text := _const(node)) is not None and _PHOTO_LINE.match(text.strip())
+    ]
+
+
+def _imports_from(path: Path, package: str) -> list[str]:
+    """Relative or absolute imports of `pv_icloud.<package>` in `path`."""
+    tree = ast.parse(path.read_text(), filename=str(path))
+    out: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            # `from ..cal...` (relative, from a sibling package) or `from pv_icloud.cal...`.
+            module = node.module or ""
+            top = module.split(".")[0] if node.level else ".".join(module.split(".")[:2])
+            if top == (package if node.level else f"pv_icloud.{package}"):
+                out.append(f"{path.name}:{node.lineno}")
+        elif isinstance(node, ast.Import):
+            if any(a.name.startswith(f"pv_icloud.{package}") for a in node.names):
+                out.append(f"{path.name}:{node.lineno}")
     return out
 
 
@@ -463,11 +494,12 @@ def _scheduling_violations(path: Path) -> list[str]:
     return out
 
 
-def test_dav_write_methods_only_in_the_calendar_write_module() -> None:
+def test_dav_write_methods_only_in_the_write_modules() -> None:
     from pv_icloud.dav import READ_METHODS
 
     assert frozenset({"PROPFIND", "REPORT"}) == READ_METHODS
     assert CALDAV_WRITE.exists(), "src/pv_icloud/cal/caldav_write.py is missing"
+    assert CARDDAV_WRITE.exists(), "src/pv_icloud/contacts/carddav_write.py is missing"
     dav = set(_dav_files())
     violations = [
         v
@@ -492,10 +524,48 @@ def test_nothing_under_cal_writes_organizer_or_attendee() -> None:
     assert [v for path in files for v in _scheduling_violations(path)] == []
 
 
+def test_contact_write_module_uses_only_put_and_delete() -> None:
+    tree = ast.parse(CARDDAV_WRITE.read_text())
+    consts = {c for n in ast.walk(tree) if (c := _const(n)) is not None}
+    assert consts & _HTTP_ANY == _DAV_WRITES
+    assert {"If-Match", "If-None-Match"} <= consts
+    assert "PROPFIND" not in consts and "REPORT" not in consts  # reads go through carddav.py
+
+
 def test_contacts_send_only_through_the_dav_base() -> None:
+    # Only the write module touches the HTTP client directly; reads use DavClient._request.
     for path in sorted((SRC / "contacts").glob("*.py")):
+        if path == CARDDAV_WRITE:
+            continue
         text = path.read_text()
         assert "_http" not in text and "httpx.Client" not in text, path.name
+
+
+def test_nothing_under_contacts_writes_a_photo() -> None:
+    files = sorted((SRC / "contacts").glob("*.py"))
+    assert CARDDAV_WRITE in files and SRC / "contacts" / "compose.py" in files
+    assert [v for path in files for v in _photo_violations(path)] == []
+
+
+@pytest.mark.parametrize(
+    "source", ["line = 'PHOTO;ENCODING=b;TYPE=JPEG:' + data", "x = 'item1.photo:x'", "n = 'PHOTO'"]
+)
+def test_photo_policy_catches_photo_lines(tmp_path: Path, source: str) -> None:
+    path = tmp_path / "compose.py"
+    path.write_text(source + "\n")
+    assert len(_photo_violations(path)) == 1
+
+
+def test_write_modules_do_not_import_each_other() -> None:
+    assert _imports_from(CARDDAV_WRITE, "cal") == []
+    assert _imports_from(CALDAV_WRITE, "contacts") == []
+    assert _imports_from(SRC / "contacts" / "compose.py", "cal") == []
+
+
+def test_import_policy_catches_imports(tmp_path: Path) -> None:
+    path = tmp_path / "carddav_write.py"
+    path.write_text("from ..cal.caldav_write import CalDavWriter\nimport pv_icloud.cal.compose\n")
+    assert len(_imports_from(path, "cal")) == 2
 
 
 @pytest.mark.parametrize(
@@ -511,6 +581,13 @@ def test_contacts_send_only_through_the_dav_base() -> None:
         ("caldav_write.py", "self._http.request('POST', url)", "forbidden"),
         ("caldav_write.py", "x = 'PROPPATCH'", "PROPPATCH is forbidden"),
         ("carddav.py", "self._http.request('PUT', url)", "PUT outside"),
+        ("vcard.py", "METHOD = 'DELETE'", "DELETE outside"),
+        ("compose.py", "self._http.request(method, url)", "string literal"),
+        ("carddav_write.py", "self._http.request('MKCOL', url)", "forbidden"),
+        ("carddav_write.py", "self._http.request('POST', url)", "forbidden"),
+        ("carddav_write.py", "self._http.request('COPY', url)", "forbidden"),
+        ("carddav_write.py", "x = 'PROPPATCH'", "PROPPATCH is forbidden"),
+        ("carddav_write.py", "x = 'MOVE'", "MOVE is forbidden"),
         ("feeds.py", "self._http.build_request('POST', url)", "POST is forbidden"),
     ],
 )
@@ -521,10 +598,11 @@ def test_dav_policy_catches_write_methods(tmp_path: Path, name: str, source: str
     assert violations and any(message in v for v in violations), violations
 
 
-def test_dav_policy_allows_the_write_module_and_mail(tmp_path: Path) -> None:
-    path = tmp_path / "caldav_write.py"
-    path.write_text("self._http.request('PUT', url)\nself._http.request(method, url)\n")
-    assert _http_method_violations(path, dav=True) == []
+def test_dav_policy_allows_the_write_modules_and_mail(tmp_path: Path) -> None:
+    for name in ("caldav_write.py", "carddav_write.py"):
+        path = tmp_path / name
+        path.write_text("self._http.request('PUT', url)\nself._http.request(method, url)\n")
+        assert _http_method_violations(path, dav=True) == []
     # IMAP's UID COPY is not a DAV request; mail is outside the DAV modules.
     path = tmp_path / "imap_write.py"
     path.write_text("conn.uid('COPY', str(uid), dest)\n")

@@ -15,7 +15,7 @@ Only the latest release is supported.
 ## Threat model in short
 
 Private iCloud MCP gives an MCP client read access to one person's iCloud Mail, Calendar and
-Contacts, and, only where the operator turns it on, limited write access to Mail. The design
+Contacts, and, only where the operator turns it on, limited write access to each of them. The design
 assumes the server runs on hardware the account owner controls and is reached over a private
 network.
 
@@ -50,18 +50,21 @@ without the switch and the grant; a write to a calendar the rules above exclude;
 that makes iCloud email someone other than the account; any DAV method other than those
 ADR-0005 lists.
 
-**Optional contact write access** ([ADR-0006](docs/adr/0006-opt-in-contact-write.md); being
-implemented). Writes need both `PV_ICLOUD_CONTACTS_WRITE=enabled` and a per-token grant
-(`create`, `update`, `delete`, each separately; delete is permanent, as iCloud keeps no
-per-contact trash). They change one contact at a time, as conditional requests, and an update
-changes only the properties it was asked to change, keeping everything else in the card. They
-never touch the me-card's existence, contact groups themselves, or contacts in excluded groups.
-These are vulnerabilities: a contact write without the switch and the matching grant; any
-change to a property the call did not ask to change; any write to a contact in an excluded
-group; any DAV method other than those ADR-0006 lists.
+**Optional contact write access** ([ADR-0006](docs/adr/0006-opt-in-contact-write.md)).
+Writes need both `PV_ICLOUD_CONTACTS_WRITE=enabled` and a per-token grant (`create`,
+`update`, `delete`, each separately; delete is permanent, as iCloud keeps no per-contact
+trash). They change one contact at a time, count against the token's hourly write limit, and
+are conditional requests made after a fresh read, so they cannot overwrite a change made
+elsewhere. An update edits the stored card in place and changes only the properties it was
+asked to change, plus the revision time (`REV`) and a display name derived from the old name;
+everything else in the card, the photo included, is kept byte for byte. They never delete
+the me-card, never create, rename or delete groups, and never reach contacts in excluded
+groups. These are vulnerabilities: a contact write without the switch and the matching grant;
+any other change to a property the call did not ask to change; any write to a contact in an
+excluded group; any DAV method other than those ADR-0006 lists.
 
 Write access raises the stakes of prompt injection: untrusted mail could try to make a model
-move, delete, draft or send. The defences above lower that risk but cannot remove it, and a
+move, delete, draft or send, or change events or contacts. The defences above lower that risk but cannot remove it, and a
 sent message cannot be recalled. Grant only the actions a client needs; prefer `draft` over
 `send`; give `send` a `send_to` allowlist, or grant it only to clients that confirm each send
 with a person.

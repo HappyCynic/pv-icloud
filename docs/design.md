@@ -9,15 +9,15 @@ How Private iCloud MCP (`pv-icloud`) works and why. Decisions with more backgrou
 - **Read-only by default**: no read path can change iCloud data or read state. Moving,
   archiving and deleting mail exist only when the deployment switches them on and a token is
   granted them ([Mail writes](#mail-writes); ADR-0004), and so do creating, changing and
-  deleting calendar events ([Calendar writes](#calendar-writes); ADR-0005). Contacts are
-  always read-only.
+  deleting calendar events ([Calendar writes](#calendar-writes); ADR-0005) and contacts
+  ([Contact writes](#contact-writes); ADR-0006).
 - Serve **several iCloud accounts** from one server, each strictly isolated (ADR-0003).
 - Fast enough for interactive use: cross-folder mail search well under a second.
 - Run on a small always-on host (a home server or NAS), not on a Mac.
 
 Out of scope: Reminders and Notes (iCloud does not expose current Reminders or Notes over a
-standard protocol; ADR-0002), and any write action other than the opt-in mail and calendar
-writes.
+standard protocol; ADR-0002), and any write action other than the opt-in mail, calendar and
+contact writes.
 
 ## Overview
 
@@ -40,10 +40,10 @@ client and a CardDAV client with an in-memory contacts cache.
 | `auth` | Bearer token → account (SHA-256, constant-time) |
 | `server` | Tool definitions, audit log, `/healthz`, per-account runtime |
 | `mail/` | IMAP pool, message parsing, HTML → text, FTS5 index, sync worker, tools; `mail/imap_write.py` is the only code that changes mail (loaded only when writes are on) |
-| `ratelimit` | Per-token write limit, mail and calendar together (in memory) |
+| `ratelimit` | Per-token write limit, mail, calendar and contacts together (in memory) |
 | `dav` | Read-only WebDAV base (`PROPFIND`/`REPORT` only), shared throttle |
 | `cal/` | CalDAV client, subscribed-feed fetcher, recurrence expansion, event ids, tools; `cal/caldav_write.py` is the only code that changes calendars and `cal/compose.py` builds the events it writes (both loaded only when calendar writes are on) |
-| `contacts/` | CardDAV client, vCard parser, contacts cache and tools |
+| `contacts/` | CardDAV client, vCard parser, contacts cache and tools; `contacts/carddav_write.py` is the only code that changes contacts and `contacts/compose.py` builds and edits the cards it writes (both loaded only when contact writes are on) |
 | `people` | `find_person`: contacts joined with the mail index |
 
 ## Tools
@@ -70,11 +70,16 @@ client and a CardDAV client with an in-memory contacts cache.
 | `calendar_event_create` | *Opt-in write.* Creates one event, single or recurring, without attendees |
 | `calendar_event_update` | *Opt-in write.* Changes the given fields of one event or one occurrence |
 | `calendar_event_delete` | *Opt-in write.* Deletes one event or one occurrence; cannot be undone |
+| `contacts_create` | *Opt-in write.* Creates one contact, optionally in existing groups |
+| `contacts_update` | *Opt-in write.* Changes, adds or removes fields of one contact in place, and its group membership |
+| `contacts_delete` | *Opt-in write.* Deletes one contact (never the me-card); cannot be undone |
 
 The mail write tools exist only with `PV_ICLOUD_MAIL_WRITE=enabled` and are listed only to
 tokens granted them; see [Mail writes](#mail-writes). The calendar write tools exist only
 with `PV_ICLOUD_CALENDAR_WRITE=enabled` and are listed only to tokens with `calendar_write`;
-see [Calendar writes](#calendar-writes).
+see [Calendar writes](#calendar-writes). The contact write tools exist only with
+`PV_ICLOUD_CONTACTS_WRITE=enabled` and are listed only to tokens granted their action in
+`contacts_write`; see [Contact writes](#contact-writes).
 
 Conventions shared by all tools:
 
@@ -333,7 +338,8 @@ subscribed or read-only calendars.
 
 A CardDAV client on the same read-only base. Each account's address book is cached **in
 memory only** (contacts never reach `/data`): loaded once in the background at startup, then
-kept current with `sync-collection`, at most once a minute, fetching only changed cards.
+kept current with `sync-collection`, at most once a minute, fetching only changed cards, and
+right after every contact write.
 
 The vCard parser handles Apple's conventions: item groups with `X-ABLabel` labels, folded lines
 (also inside parameters), `TYPE` lists, birthdays without a year, related names, dates and
@@ -346,6 +352,71 @@ into one person; other addresses become mail-only people. Each person gets messa
 first and last dates and the newest message ids; the caller's own addresses are marked
 `is_me`. It does not read calendars (a long-range calendar scan costs seconds); its description
 points the model to `calendar_search` instead.
+
+## Contact writes
+
+Creating, changing and deleting contacts (ADR-0006) follows the pattern of calendar writes:
+a deployment switch (`PV_ICLOUD_CONTACTS_WRITE=enabled`; without it
+`contacts/carddav_write.py` and `contacts/compose.py` are never imported and no contact write
+tool is registered), a per-token grant per action (`contacts_write: [create, update,
+delete]`; delete is its own grant because it is permanent; a grant without the switch, or on
+an account with `contacts.enabled: false`, is a config error), a per-token tools list and
+instructions, the token's hourly write limit (shared with mail and calendar writes) and audit
+lines with `write: true` in which every argument, the id included, is redacted.
+
+**Lossless edits.** The reader drops what it does not show (photos, `X-APPLE-…` and unknown
+properties), so a card is never rebuilt from the parsed contact. `contacts/compose.py` splits
+the stored text into logical lines that keep their exact bytes (folds and line endings),
+rewrites only the lines a change names, adds new lines just before `END:VCARD`, and emits
+every other line as stored, in order. Structured properties (`N`, `ORG`) keep their
+parameters and the components not changed, escaped as stored. Two properties change without
+being named, as Apple's apps do: `REV` is set to the current UTC time on every card a call
+writes (added if missing), and `FN` follows a name change only if it equalled the old name
+parts (for a card shown as a company, the old organization), so a custom display name is
+kept. A removed value takes its item group's label lines with it. A change is refused, with
+nothing written, when a single-valued property it changes appears twice, a card has two
+`REV` lines, a value to remove shares its item group with another property or matches more
+than one value, the card is not vCard 3.0, or a line cannot be split. New lines use the
+card's own line ending; card text is read with each CR as `&#13;` (as Apple's server sends
+it), since an XML parser turns a literal CR LF into LF.
+
+**Labels** are written in the forms Apple's apps write (checked on a live address book,
+2026-10-14): one `TYPE=` parameter per type, `IPHONE` before `CELL`, `VOICE` only on the
+built-in voice types (`mobile`, `iPhone`, `home`, `work`), `INTERNET` first on emails and
+`PREF` last; other labels go in an item group with `X-ABLabel` (Apple's built-in ones as
+`_$!<Other>!$_`). Unlabelled and item-group phones carry no `VOICE`, and item-group emails no
+`HOME` or `WORK`. Tests pin both the bytes and the label `contacts_get` reads back.
+
+**Groups.** Membership lives in the group's card (`X-ADDRESSBOOKSERVER-MEMBER`), so adding a
+contact to a group or removing it is a lossless edit of that card: one member line added or
+removed, `REV` bumped, every other line (members hidden from the caller included) kept.
+Groups are never created, renamed or deleted. A delete leaves the deleted contact's member
+entries in group cards, as Apple's own clients do; the reader ignores them.
+
+**Visibility.** A write reaches only a contact `contacts_get` would return: an id is looked
+up in the in-memory snapshot (never used to build a URL), and members of an excluded group,
+group cards and unknown ids all fail with the same `contact not found`. A group named in a
+call must be visible; an excluded one gives `unknown group`, like a missing one. The me-card
+can be updated but not deleted.
+
+**Fresh reads and conditional writes.** `contacts/carddav_write.py` is the only module that
+sends `PUT` or `DELETE`, always for one `.vcf` directly inside the account's address book
+(itself directly under the discovered home), always conditional: a new card (a random UUID as
+file name and `UID`) with `If-None-Match: *`; an update or delete only after one
+`addressbook-multiget` re-reads the contact card and every group card the call changes, with
+`If-Match` and exactly the ETags just read. Everything is checked against that read before
+the first write. The contact card is written first, then each group card in name order; if
+one fails (a 412 because it changed in Contacts, throttling, a network error), the call stops
+and its error says what was saved. Nothing is rolled back or retried. After any write the
+address book is refreshed at once; if that refresh fails, what was written is applied to the
+copy in memory, which is marked stale.
+
+`tests/test_repo_policy.py` checks that `PUT` and `DELETE` are used as HTTP methods only in
+the two write modules, that no source sends another DAV write method, that nothing under
+`contacts/` writes a `PHOTO` line, and that the two write modules do not import each other.
+The fake CardDAV server refuses unconditional writes, writes outside the address book and
+deletes of group cards or the me-card, and records each attempt; the tests require that
+record to stay empty.
 
 ## iCloud throttling
 
@@ -362,8 +433,9 @@ one account; credentials come from `PV_ICLOUD_<ID>_ICLOUD_USER` and
 `PV_ICLOUD_<ID>_APP_PASSWORD`. Each account has its own index file, connection pool, sync
 thread, DAV clients and contacts cache. Audit lines (JSON on stdout) record account, token
 label, tool, redacted arguments, result count and latency; search text, ids and folder names
-are reduced to their length. Mail write calls also carry `write: true`, and a call refused by
-the write limit has outcome `throttled`.
+are reduced to their length. Write calls also carry `write: true`, and a call refused by
+the write limit has outcome `throttled`. httpx's own request log (which names every URL, so
+card and event paths and subscribed feed URLs) is kept to warnings.
 
 `/healthz` is open for container health checks and returns only `{"status"}` (503 only when
 every account's mail sync has failed). With a valid bearer token it adds the caller's own
