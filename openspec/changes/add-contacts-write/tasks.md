@@ -88,7 +88,7 @@ Each group ends with its tests passing.
 
 ## 6. Write path
 
-- [ ] 6.1 Write tests for `src/pv_icloud/contacts/carddav_write.py` against the fake: only
+- [x] 6.1 Write tests for `src/pv_icloud/contacts/carddav_write.py` against the fake: only
   `PUT` and `DELETE`; refuses to send without `If-Match` or `If-None-Match: *`; refuses any
   URL that is not a direct `.vcf` child of the account's address book as listed under its
   home; sends `Content-Type: text/vcard; charset=utf-8`; 412 mapped to `the contact changed
@@ -96,7 +96,7 @@ Each group ends with its tests passing.
   `iCloud refused the change`; 429/503 pauses the account's shared `Throttle` and is not
   retried; a paused account sends nothing; a timeout after sending reports an unconfirmed
   change; logs carry no path, UID or body.
-- [ ] 6.2 Implement `src/pv_icloud/contacts/carddav_write.py` (SPDX header); verify 6.1 and
+- [x] 6.2 Implement `src/pv_icloud/contacts/carddav_write.py` (SPDX header); verify 6.1 and
   1.1 pass.
 
 ## 7. Create, update and delete in the contacts service
