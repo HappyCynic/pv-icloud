@@ -90,14 +90,14 @@ approved the proposal. Each group ends with its tests passing.
 
 ## 6. Write path
 
-- [ ] 6.1 Write tests for `src/pv_icloud/cal/caldav_write.py` against the fake: only `PUT`
+- [x] 6.1 Write tests for `src/pv_icloud/cal/caldav_write.py` against the fake: only `PUT`
   and `DELETE`; refuses to send without `If-Match` or `If-None-Match: *`; refuses any URL
   that is not a direct `.ics` child of the given writable calendar collection; sends
   `Schedule-Reply: F`; 412 mapped to `the event changed in Calendar; read it again` and not
   retried; 404 to `not found`; 403 and other 4xx to `iCloud refused the change`; 429/503
   pauses the account's shared `Throttle` and is not retried; a paused account sends nothing;
   a timeout after sending reports an unconfirmed change; logs carry no path, UID or body.
-- [ ] 6.2 Implement `src/pv_icloud/cal/caldav_write.py` (SPDX header); verify 6.1 and 1.1
+- [x] 6.2 Implement `src/pv_icloud/cal/caldav_write.py` (SPDX header); verify 6.1 and 1.1
   pass.
 
 ## 7. Create, update and delete in the calendar service

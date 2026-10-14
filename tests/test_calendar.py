@@ -540,7 +540,10 @@ class TestWriteReads:
         home = fake.accounts["alice@icloud.com"].calendars[0]
         fake.requests.clear()
         got = service.client.event_resource(cal, "/111/calendars/home/1.ics")
-        assert got == (home.resources[1], etag(home.resources[1]))
+        stored = home.resources[1]
+        assert got is not None and stored is not None
+        # XML parsing turns the CRLF line ends into LF; icalendar reads either.
+        assert got == (stored.replace("\r\n", "\n"), etag(stored))
         assert service.client.event_resource(cal, "/111/calendars/home/99.ics") is None
         assert [m for m, _ in fake.requests] == ["REPORT", "REPORT"]
         assert all("calendar-multiget" in b and "<c:expand" not in b for b in fake.report_bodies)

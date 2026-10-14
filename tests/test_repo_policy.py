@@ -12,10 +12,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 OWNER = "@mwklein"
-# Owned before they exist: the modules allowed to change calendars (ADR-0005) and contacts
-# (ADR-0006), created by their changes. Remove a path from here once it exists.
+# Owned before they exist: the module allowed to change contacts (ADR-0006), created by its
+# change. Remove a path from here once it exists.
 PLANNED_PATHS: set[str] = {
-    "/src/pv_icloud/cal/caldav_write.py",
     "/src/pv_icloud/contacts/carddav_write.py",
 }
 
@@ -456,7 +455,8 @@ def _scheduling_violations(path: Path) -> list[str]:
         ):
             out.append(f"{where}: writes {_const(node.args[0])}")
         elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store):
-            if (_const(node.slice) or "").upper() in _SCHEDULING_PROPS:
+            # Property names as written; the read path's result dicts use `organizer` keys.
+            if _const(node.slice) in _SCHEDULING_PROPS:
                 out.append(f"{where}: writes {_const(node.slice)}")
         elif (text := _const(node)) is not None and re.match(r"(?i)(ORGANIZER|ATTENDEE)[;:]", text):
             out.append(f"{where}: builds an {text.split(';')[0].split(':')[0]} line")

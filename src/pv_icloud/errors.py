@@ -11,5 +11,6 @@ class ToolInputError(ValueError):
 
 
 class WriteFailed(Exception):
-    """A mail write failed upstream. The message says where the message was left and is safe
-    to show the caller (and to log): it names no folder, address or content."""
+    """A mail or calendar write failed upstream. The message says where the message (or
+    event) was left and is safe to show the caller (and to log): it names no folder, address,
+    calendar or content."""
