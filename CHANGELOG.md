@@ -7,6 +7,12 @@ each version.
 
 ## [Unreleased]
 
+### Fixed
+
+- Calendar tools now show the account's own address as the organiser's or an attendee's
+  `email`. iCloud stores it as the account's principal path with the address in an `EMAIL=`
+  parameter, which was shown as `email: null`; `calendar_search` finds it too.
+
 ## [0.2.0] - 2026-10-13
 
 ### Added

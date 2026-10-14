@@ -58,17 +58,17 @@ approved the proposal. Each group ends with its tests passing.
 
 ## 4. Read-side additions and the `EMAIL=` fix
 
-- [ ] 4.1 Write tests in `tests/test_calendar.py`: an organiser or attendee stored as a
+- [x] 4.1 Write tests in `tests/test_calendar.py`: an organiser or attendee stored as a
   principal path with `EMAIL=` shows that address as `email` in `calendar_events` and
   `calendar_event`, and `calendar_search` finds it; without `EMAIL=` `email` stays null.
-- [ ] 4.2 Fix `_person` in `src/pv_icloud/cal/parse.py`; verify 4.1 passes. Add a
+- [x] 4.2 Fix `_person` in `src/pv_icloud/cal/parse.py`; verify 4.1 passes. Add a
   `CHANGELOG.md` `Unreleased` entry for the fix.
-- [ ] 4.3 Write tests for the new reads in `cal/caldav.py`: the calendar list carries each
+- [x] 4.3 Write tests for the new reads in `cal/caldav.py`: the calendar list carries each
   calendar's privileges (from `current-user-privilege-set`, asked for in the existing
   `PROPFIND`, with no extra request); one event resource read with its ETag, unexpanded;
   the account's calendar addresses and principal URL read once and cached. All send only
   `PROPFIND` and `REPORT`.
-- [ ] 4.4 Implement them in `src/pv_icloud/cal/caldav.py`; verify 4.3 passes and the read
+- [x] 4.4 Implement them in `src/pv_icloud/cal/caldav.py`; verify 4.3 passes and the read
   tools' results are unchanged.
 
 ## 5. iCalendar composition

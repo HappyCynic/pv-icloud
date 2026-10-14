@@ -82,11 +82,21 @@ def _as_utc(value: dt.date | dt.datetime, default_tz: dt.tzinfo) -> dt.datetime:
     return value.astimezone(dt.UTC)
 
 
+def person_email(prop: Any) -> str | None:
+    """The address of an ORGANIZER or ATTENDEE value. iCloud stores the account's own address
+    as its principal path with the address in an `EMAIL=` parameter (live check, 2026-10-13),
+    so a value that is not `mailto:` takes the parameter instead. Shared with the calendar
+    write path's "is this the account itself" check, so reads and writes agree."""
+    address = str(prop).strip()
+    if address.lower().startswith("mailto:"):
+        return address[7:].strip() or None
+    email = getattr(prop, "params", {}).get("EMAIL")
+    return (str(email).strip() or None) if email else None
+
+
 def _person(prop: Any) -> dict[str, Any]:
-    address = str(prop)
-    email = address[7:] if address.lower().startswith("mailto:") else None
     params = getattr(prop, "params", {})
-    out: dict[str, Any] = {"name": params.get("CN") or None, "email": email}
+    out: dict[str, Any] = {"name": params.get("CN") or None, "email": person_email(prop)}
     if "PARTSTAT" in params:
         out["status"] = str(params["PARTSTAT"]).lower()
     return out
