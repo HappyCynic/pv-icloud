@@ -13,7 +13,8 @@ Calendar writes (ADR-0005) need three more reads, still PROPFIND and REPORT only
 calendar's `current-user-privilege-set` (asked for in the calendar list), one stored event
 resource with its ETag (a single-href `calendar-multiget`: iCloud answers a Depth 0
 `calendar-query` on a resource URL with 403, live check 2026-10-14), and the account's
-`calendar-user-address-set`.
+`calendar-user-address-set`. A series edit (ADR-0007) also lists a calendar by time range,
+unexpanded, to find the other parts of a series split in Calendar.
 
 Subscribed (webcal) calendars are listed with their feed URL (`cs:source`), but iCloud
 returns no event data for them over CalDAV; `feeds.py` fetches those, as Apple clients do.
@@ -108,6 +109,20 @@ def _events_body(start: dt.datetime, end: dt.datetime) -> str:
         f'<d:prop><c:calendar-data><c:expand start="{s}" end="{e}"/></c:calendar-data></d:prop>'
         '<c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT">'
         f'<c:time-range start="{s}" end="{e}"/>'
+        "</c:comp-filter></c:comp-filter></c:filter></c:calendar-query>"
+    )
+
+
+def _listing_body(start: dt.datetime, end: dt.datetime | None) -> str:
+    # Unexpanded, with ETags: each resource as stored, for a series edit to find the parts of
+    # a recurrence set. Only a time range: iCloud has no property filter (a `prop-filter`
+    # matches nothing, a `collation` gives 412, a `param-filter` 500; live check 2026-10-14).
+    bound = f' end="{_utc_stamp(end)}"' if end is not None else ""
+    return (
+        '<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
+        "<d:prop><d:getetag/><c:calendar-data/></d:prop>"
+        '<c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT">'
+        f'<c:time-range start="{_utc_stamp(start)}"{bound}/>'
         "</c:comp-filter></c:comp-filter></c:filter></c:calendar-query>"
     )
 
@@ -218,6 +233,23 @@ class CalDavClient(DavClient):
         url = httpx.URL(calendar.url)
         root, base = self._request("REPORT", url, _events_body(start, end), "1")
         return self._resources(root, base)
+
+    def event_listing(
+        self, calendar: CalendarInfo, start: dt.datetime, end: dt.datetime | None
+    ) -> list[tuple[str, str, str]]:
+        """(resource path, stored iCalendar text, ETag) of every resource with an occurrence
+        in [start, end), unexpanded; no end means open-ended."""
+        url = httpx.URL(calendar.url)
+        root, base = self._request("REPORT", url, _listing_body(start, end), "1")
+        out: list[tuple[str, str, str]] = []
+        for resp in root.findall("d:response", NS):
+            href = _text(resp.find("d:href", NS))
+            data = resp.find("d:propstat/d:prop/c:calendar-data", NS)
+            tag = _text(resp.find("d:propstat/d:prop/d:getetag", NS))
+            if href and data is not None and data.text and tag:
+                raw = base.join(href).raw_path.decode("ascii").split("?", 1)[0]
+                out.append((raw, data.text, tag))
+        return out
 
     def event_resource(self, calendar: CalendarInfo, path: str) -> tuple[str, str] | None:
         """(stored iCalendar text, ETag) of one resource, unexpanded; None when it is gone.

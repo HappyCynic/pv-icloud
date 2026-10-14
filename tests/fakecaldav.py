@@ -27,8 +27,9 @@ Series edits (add-calendar-series-edit, live checks 2026-10-14) also need an une
 when any occurrence falls in it), answered with each resource's ETag and stored data, and
 iCloud's answers to the filters it does not support: a `prop-filter` matches nothing (207),
 a `collation` gives 412 and a `param-filter` 500. `calls` records every request in order
-with what kind of read or which precondition it carried, and `put_fail` answers the next
-`PUT` to a resource with a chosen status, or stores it and loses the answer.
+with what kind of read or which precondition it carried; `put_fail` answers the next `PUT`
+to a resource with a chosen status, or stores it and loses the answer, and `delete_fail`
+answers the next `DELETE` to a resource with a chosen status.
 """
 
 from __future__ import annotations
@@ -204,6 +205,7 @@ class FakeCalDav:
         self.write_fail: tuple[int, str | None] | None = None  # (status, Retry-After)
         # Resource name -> status for the next PUT to it; None: store it, lose the answer.
         self.put_fail: dict[str, int | None] = {}
+        self.delete_fail: dict[str, int] = {}  # resource name -> status for the next DELETE
         # (method, resource or collection path, kind): REPORT kinds are `multiget`,
         # `expand` and `listing`; writes carry `If-Match` or `If-None-Match`.
         self.calls: list[tuple[str, str, str]] = []
@@ -431,6 +433,8 @@ class FakeCalDav:
             if failure is not None:
                 return done(failure)
             lose_answer = True
+        if method == "DELETE" and name in self.delete_fail:
+            return done(self.delete_fail.pop(name))
         current = cal.get(name)
         if method == "DELETE":
             if current is None:

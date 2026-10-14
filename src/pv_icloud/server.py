@@ -455,9 +455,10 @@ def build_server(runtime: Runtime) -> MCPServer:
             outcome = "invalid"
             raise ToolError(str(exc)) from exc
         except WriteFailed as exc:
-            # The message says where the mail was left; it names no folder or content.
+            # The message says where the mail was left; it names no folder or content (a
+            # series edit's names what it changed, so only its log_text is logged).
             outcome = "upstream_error"
-            log.warning("%s %s: %s", ctx.account_id, tool, exc)
+            log.warning("%s %s: %s", ctx.account_id, tool, exc.log_text)
             raise ToolError(str(exc)) from exc
         except DavThrottled as exc:
             outcome = "throttled"

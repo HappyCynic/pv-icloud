@@ -77,13 +77,13 @@ ADR-0007 (design decision 11). Each group ends with its tests passing.
 
 ## 4. Calendar service
 
-- [ ] 4.1 Write failing tests in `tests/test_calendar_write.py` against the fake server for
+- [x] 4.1 Write failing tests in `tests/test_calendar_write.py` against the fake server for
   all four modes on a school-day series with deleted and moved occurrences before and after
   the date: what `calendar_events` returns afterwards, occurrences before the date identical
   to before the call in `replace_from` and `update_from`, unmatched exceptions listed and
   `drop_unmatched`, counts, the result's `id` readable by `calendar_event`, and `previous` and
   `ids_changed_from` in the `_from` modes.
-- [ ] 4.2 Write failing tests for split series against the fake server: a two-part set
+- [x] 4.2 Write failing tests for split series against the fake server: a two-part set
   changed with `update_all` and a new title (one `PUT` with `If-Match` per part, both parts
   show the title); the refusals with no write request; `update_from` with a later part
   (split, then the later part's `PUT`); `effective` at a later part's start (in place, no new
@@ -92,7 +92,7 @@ ADR-0007 (design decision 11). Each group ends with its tests passing.
   calendar ignored; a part that ended more than a year ago not written by `update_all`; the
   `_from` modes never listing before `effective`; and no request with a `prop-filter`,
   `param-filter` or `collation` in any test.
-- [ ] 4.3 Write failing tests for the request sequence: one `PUT` with `If-Match` per part for
+- [x] 4.3 Write failing tests for the request sequence: one `PUT` with `If-Match` per part for
   `_all`; `PUT` with `If-None-Match: *` then `PUT` with `If-Match` for a split; rollback (one
   `REPORT`, one `DELETE` with `If-Match`) after 412, 404 and 403 on the cut, leaving the
   calendar as it was, and no later part written; no rollback and the "may be stored twice"
@@ -101,7 +101,7 @@ ADR-0007 (design decision 11). Each group ends with its tests passing.
   only reads; `Schedule-Reply: F` on every write and an empty `scheduling_messages` record;
   refusals for attendees, other organisers, protected, subscribed and read-only calendars
   with no write request.
-- [ ] 4.4 Add the unexpanded time-range listing to `src/pv_icloud/cal/caldav.py` (a
+- [x] 4.4 Add the unexpanded time-range listing to `src/pv_icloud/cal/caldav.py` (a
   `calendar-query` `REPORT` through the read-only DAV base, optional end, no property
   filter), implement `CalendarService.update_series` in
   `src/pv_icloud/cal/service.py` (fresh reads via `_fresh`, compose, preview, the write order
