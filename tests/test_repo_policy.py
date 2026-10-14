@@ -12,10 +12,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 OWNER = "@mwklein"
-# Owned before they exist: the modules allowed to change calendars (ADR-0005) and contacts
-# (ADR-0006), created by their changes. Remove a path from here once it exists.
+# Owned before they exist: the module allowed to change contacts (ADR-0006), created by its
+# change. Remove a path from here once it exists.
 PLANNED_PATHS: set[str] = {
-    "/src/pv_icloud/cal/caldav_write.py",
     "/src/pv_icloud/contacts/carddav_write.py",
 }
 
@@ -385,6 +384,173 @@ def test_dav_sends_only_propfind_and_report() -> None:
         for call in _calls(path):
             if _method(call) == "_request":
                 assert _const(call.args[0]) in READ_METHODS, f"{path.name}:{call.lineno}"
+
+
+# --- CalDAV write methods (ADR-0005) -------------------------------------------------------
+
+SRC = ROOT / "src" / "pv_icloud"
+CALDAV_WRITE = SRC / "cal" / "caldav_write.py"
+_DAV_WRITES = frozenset({"PUT", "DELETE"})
+_DAV_FORBIDDEN = frozenset({"MKCALENDAR", "MKCOL", "PROPPATCH", "MOVE", "COPY", "ACL", "LOCK"})
+_HTTP_ANY = frozenset({"GET", "HEAD", "POST", "PATCH", "OPTIONS"}) | _DAV_WRITES | _DAV_FORBIDDEN
+# httpx shortcuts that send a write method; flagged on any receiver whose name ends in http.
+_HTTP_WRITE_CALLS = frozenset({"put", "post", "patch", "delete"})
+# Modules that may pass a method held in a variable: each checks it against its own list.
+_METHOD_VARIABLE_OK = frozenset({"dav.py", "caldav_write.py"})
+_SCHEDULING_PROPS = ("ORGANIZER", "ATTENDEE")
+
+
+def _dav_files() -> list[Path]:
+    return [SRC / "dav.py", *sorted((SRC / "cal").glob("*.py")), *(SRC / "contacts").glob("*.py")]
+
+
+def _receiver_name(call: ast.Call) -> str:
+    assert isinstance(call.func, ast.Attribute)
+    recv = call.func.value
+    return recv.attr if isinstance(recv, ast.Attribute) else getattr(recv, "id", "")
+
+
+def _http_method_violations(path: Path, *, dav: bool) -> list[str]:
+    """`PUT` and `DELETE` only in caldav_write.py; no other DAV write method anywhere in the
+    DAV modules; HTTP requests name their method as a literal (or a checked variable)."""
+    in_write = path.name == CALDAV_WRITE.name
+    tree = ast.parse(path.read_text(), filename=str(path))
+    out: list[str] = []
+    for node in ast.walk(tree):
+        where = f"{path.name}:{getattr(node, 'lineno', 0)}"
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute):
+            method = node.func.attr
+            if method in ("request", "build_request") and _receiver_name(node).endswith("http"):
+                verb = _const(node.args[0]) if node.args else None
+                if verb is None:
+                    if path.name not in _METHOD_VARIABLE_OK:
+                        out.append(f"{where}: HTTP method must be a string literal")
+                elif verb in _DAV_WRITES and not in_write:
+                    out.append(f"{where}: {verb} outside {CALDAV_WRITE.name}")
+                elif verb not in _DAV_WRITES and verb not in {"PROPFIND", "REPORT", "GET"}:
+                    out.append(f"{where}: HTTP {verb} is forbidden")
+            elif method in _HTTP_WRITE_CALLS and _receiver_name(node).endswith("http"):
+                out.append(f"{where}: .{method}() is forbidden; use request() with a literal")
+        if dav and (verb := _const(node)) is not None:
+            if verb in _DAV_FORBIDDEN or verb == "POST":
+                out.append(f"{where}: DAV method {verb} is forbidden")
+            elif verb in _DAV_WRITES and not in_write:
+                out.append(f"{where}: {verb} outside {CALDAV_WRITE.name}")
+    return out
+
+
+def _scheduling_violations(path: Path) -> list[str]:
+    """Nothing under cal/ writes ORGANIZER or ATTENDEE: no `.add()`, item assignment or
+    hand-built content line for them (reading them with `.get()` is fine)."""
+    tree = ast.parse(path.read_text(), filename=str(path))
+    out: list[str] = []
+    for node in ast.walk(tree):
+        where = f"{path.name}:{getattr(node, 'lineno', 0)}"
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr in ("add", "__setitem__", "setdefault")
+            and node.args
+            and (_const(node.args[0]) or "").upper() in _SCHEDULING_PROPS
+        ):
+            out.append(f"{where}: writes {_const(node.args[0])}")
+        elif isinstance(node, ast.Subscript) and isinstance(node.ctx, ast.Store):
+            # Property names as written; the read path's result dicts use `organizer` keys.
+            if _const(node.slice) in _SCHEDULING_PROPS:
+                out.append(f"{where}: writes {_const(node.slice)}")
+        elif (text := _const(node)) is not None and re.match(r"(?i)(ORGANIZER|ATTENDEE)[;:]", text):
+            out.append(f"{where}: builds an {text.split(';')[0].split(':')[0]} line")
+    return out
+
+
+def test_dav_write_methods_only_in_the_calendar_write_module() -> None:
+    from pv_icloud.dav import READ_METHODS
+
+    assert frozenset({"PROPFIND", "REPORT"}) == READ_METHODS
+    assert CALDAV_WRITE.exists(), "src/pv_icloud/cal/caldav_write.py is missing"
+    dav = set(_dav_files())
+    violations = [
+        v
+        for path in sorted(SRC.rglob("*.py"))
+        for v in _http_method_violations(path, dav=path in dav)
+    ]
+    assert violations == []
+
+
+def test_calendar_write_module_uses_only_put_and_delete() -> None:
+    # Guards the check above against passing vacuously, and pins the preconditions.
+    tree = ast.parse(CALDAV_WRITE.read_text())
+    consts = {c for n in ast.walk(tree) if (c := _const(n)) is not None}
+    assert consts & _HTTP_ANY == _DAV_WRITES
+    assert {"If-Match", "If-None-Match", "Schedule-Reply"} <= consts
+    assert "PROPFIND" not in consts and "REPORT" not in consts  # reads go through cal/caldav.py
+
+
+def test_nothing_under_cal_writes_organizer_or_attendee() -> None:
+    files = sorted((SRC / "cal").glob("*.py"))
+    assert CALDAV_WRITE in files and SRC / "cal" / "compose.py" in files
+    assert [v for path in files for v in _scheduling_violations(path)] == []
+
+
+def test_contacts_send_only_through_the_dav_base() -> None:
+    for path in sorted((SRC / "contacts").glob("*.py")):
+        text = path.read_text()
+        assert "_http" not in text and "httpx.Client" not in text, path.name
+
+
+@pytest.mark.parametrize(
+    ("name", "source", "message"),
+    [
+        ("caldav.py", "self._http.request('PUT', url)", "PUT outside"),
+        ("caldav.py", "self._http.request(method, url)", "string literal"),
+        ("caldav.py", "self._http.put(url)", ".put() is forbidden"),
+        ("caldav.py", "self._http.delete(url)", ".delete() is forbidden"),
+        ("caldav.py", "METHOD = 'DELETE'", "DELETE outside"),
+        ("caldav_write.py", "self._http.request('MKCALENDAR', url)", "forbidden"),
+        ("caldav_write.py", "self._http.request('MOVE', url)", "forbidden"),
+        ("caldav_write.py", "self._http.request('POST', url)", "forbidden"),
+        ("caldav_write.py", "x = 'PROPPATCH'", "PROPPATCH is forbidden"),
+        ("carddav.py", "self._http.request('PUT', url)", "PUT outside"),
+        ("feeds.py", "self._http.build_request('POST', url)", "POST is forbidden"),
+    ],
+)
+def test_dav_policy_catches_write_methods(tmp_path: Path, name: str, source: str, message: str):
+    path = tmp_path / name
+    path.write_text(source + "\n")
+    [*violations] = _http_method_violations(path, dav=True)
+    assert violations and any(message in v for v in violations), violations
+
+
+def test_dav_policy_allows_the_write_module_and_mail(tmp_path: Path) -> None:
+    path = tmp_path / "caldav_write.py"
+    path.write_text("self._http.request('PUT', url)\nself._http.request(method, url)\n")
+    assert _http_method_violations(path, dav=True) == []
+    # IMAP's UID COPY is not a DAV request; mail is outside the DAV modules.
+    path = tmp_path / "imap_write.py"
+    path.write_text("conn.uid('COPY', str(uid), dest)\n")
+    assert _http_method_violations(path, dav=False) == []
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "event.add('ATTENDEE', 'mailto:a@example.com')",
+        "event.add('organizer', who)",
+        "event['ATTENDEE'] = who",
+        "line = 'ATTENDEE;CN=x:mailto:a@example.com'",
+        "line = 'ORGANIZER:mailto:a@example.com'",
+    ],
+)
+def test_scheduling_policy_catches_writes(tmp_path: Path, source: str) -> None:
+    path = tmp_path / "compose.py"
+    path.write_text(source + "\n")
+    assert len(_scheduling_violations(path)) == 1
+
+
+def test_scheduling_policy_allows_reads(tmp_path: Path) -> None:
+    path = tmp_path / "compose.py"
+    path.write_text("people = event.get('ATTENDEE')\nwho = event['ORGANIZER']\n")
+    assert _scheduling_violations(path) == []
 
 
 def test_claude_md_states_checks() -> None:

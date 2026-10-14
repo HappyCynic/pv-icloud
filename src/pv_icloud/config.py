@@ -40,6 +40,10 @@ BARE_ADDRESS_RE = re.compile(rf"^[^@\s,;<>()\"]+@{_DOMAIN}$")
 # A send_to entry is a bare address or `@` followed by a domain.
 SEND_TO_DOMAIN_RE = re.compile(rf"^@{_DOMAIN}$")
 
+# Calendar writes (docs/adr/0005-opt-in-calendar-write.md): off unless this is `enabled`.
+CALENDAR_WRITE_ENV = "PV_ICLOUD_CALENDAR_WRITE"
+_CALENDAR_WRITE_KEYS = ("protected_calendars",)
+
 
 class ConfigError(Exception):
     pass
@@ -83,12 +87,22 @@ class MailConfig:
 
 
 @dataclass(frozen=True)
+class CalendarWriteConfig:
+    """Per-account `calendar.write` settings (ADR-0005); used only when writes are on."""
+
+    # Display names, exact: defaults and account lists together (an account adds, never
+    # replaces). Readable, never written.
+    protected_calendars: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
 class CalendarConfig:
     calendars: Scope
     max_range_days: int = 90
     timezone: str | None = None  # IANA zone for date-only ranges; default: from iCloud
     subscriptions: bool = True  # fetch subscribed (webcal) feeds from their publishers
     max_search_days: int = 730  # longest calendar_search range
+    write: CalendarWriteConfig = CalendarWriteConfig()
 
 
 @dataclass(frozen=True)
@@ -111,6 +125,8 @@ class TokenEntry:
     max_writes_per_hour: int = MAX_WRITES_PER_HOUR
     # Recipients mail_send may reach: lower-cased addresses and `@domain` entries; None: any.
     send_to: tuple[str, ...] | None = None
+    calendar_write: bool = False  # calendar_event_create/update/delete (ADR-0005)
+    protected_calendars: tuple[str, ...] = ()  # added to the account's protected calendars
 
 
 @dataclass(frozen=True)
@@ -129,6 +145,7 @@ class Config:
     accounts: tuple[AccountConfig, ...]
     data_dir: Path
     mail_write: bool = False  # PV_ICLOUD_MAIL_WRITE=enabled
+    calendar_write: bool = False  # PV_ICLOUD_CALENDAR_WRITE=enabled
 
     def account(self, account_id: str) -> AccountConfig:
         for acct in self.accounts:
@@ -198,16 +215,16 @@ def _timezone(value: Any, where: str) -> str | None:
     return str(value)
 
 
-def _names(value: Any, where: str) -> tuple[str, ...]:
+def _names(value: Any, where: str, kind: str = "folder") -> tuple[str, ...]:
     if not isinstance(value, list) or not all(isinstance(x, str) and x for x in value):
-        raise ConfigError(f"{where} must be a list of folder names")
+        raise ConfigError(f"{where} must be a list of {kind} names")
     return tuple(value)
 
 
-def _mail_write_switch(env: Mapping[str, str]) -> bool:
-    value = env.get(MAIL_WRITE_ENV, "").strip()
+def _switch(env: Mapping[str, str], name: str) -> bool:
+    value = env.get(name, "").strip()
     if value not in ("", "disabled", "enabled"):
-        raise ConfigError(f"{MAIL_WRITE_ENV} must be `enabled` or `disabled` (or unset)")
+        raise ConfigError(f"{name} must be `enabled` or `disabled` (or unset)")
     return value == "enabled"
 
 
@@ -231,6 +248,10 @@ def _token(t: Mapping[str, Any], label: str, digest: str, where: str) -> TokenEn
             t.get("max_writes_per_hour", MAX_WRITES_PER_HOUR), f"{where} max_writes_per_hour"
         ),
         send_to=_send_to(t, "send" in actions, where),
+        calendar_write=_bool(t.get("calendar_write", False), f"{where} calendar_write"),
+        protected_calendars=_names(
+            t.get("protected_calendars", []), f"{where} protected_calendars", "calendar"
+        ),
     )
 
 
@@ -255,13 +276,15 @@ def _send_to(t: Mapping[str, Any], send: bool, where: str) -> tuple[str, ...] | 
     return tuple(dict.fromkeys(x.lower() for x in value))
 
 
-def _write_section(raw: Any, where: str) -> Mapping[str, Any]:
+def _write_section(
+    raw: Any, where: str, keys: tuple[str, ...] = _MAIL_WRITE_KEYS
+) -> Mapping[str, Any]:
     raw = raw or {}
     if not isinstance(raw, Mapping):
         raise ConfigError(f"{where} must be a mapping")
-    unknown = set(raw) - set(_MAIL_WRITE_KEYS)
+    unknown = set(raw) - set(keys)
     if unknown:
-        known = ", ".join(_MAIL_WRITE_KEYS)
+        known = ", ".join(keys)
         raise ConfigError(f"{where}: unknown key(s) {', '.join(sorted(unknown))}; use {known}")
     return raw
 
@@ -282,8 +305,25 @@ def _mail_write(defaults: Any, account: Any, where: str) -> MailWriteConfig:
     return MailWriteConfig(tuple(dict.fromkeys(protected)), archive, send_from)
 
 
+def _calendar_write(defaults: Any, account: Any, where: str) -> CalendarWriteConfig:
+    base = _write_section(defaults, "defaults.calendar.write", _CALENDAR_WRITE_KEYS)
+    own = _write_section(account, f"{where}.calendar.write", _CALENDAR_WRITE_KEYS)
+    protected = _names(
+        base.get("protected_calendars", []),
+        "defaults.calendar.write.protected_calendars",
+        "calendar",
+    )
+    protected += _names(
+        own.get("protected_calendars", []),
+        f"{where}.calendar.write.protected_calendars",
+        "calendar",
+    )
+    return CalendarWriteConfig(tuple(dict.fromkeys(protected)))
+
+
 def parse_config(raw: Mapping[str, Any], env: Mapping[str, str], data_dir: Path) -> Config:
-    mail_write = _mail_write_switch(env)
+    mail_write = _switch(env, MAIL_WRITE_ENV)
+    calendar_write = _switch(env, CALENDAR_WRITE_ENV)
     defaults = raw.get("defaults") or {}
     accounts_raw = raw.get("accounts") or []
     if not isinstance(accounts_raw, list) or not accounts_raw:
@@ -317,6 +357,11 @@ def parse_config(raw: Mapping[str, Any], env: Mapping[str, str], data_dir: Path)
                 raise ConfigError(
                     f"{where}: token {label!r} has mail_write but {MAIL_WRITE_ENV} is not "
                     "`enabled`; set it or remove the grant"
+                )
+            if token.calendar_write and not calendar_write:
+                raise ConfigError(
+                    f"{where}: token {label!r} has calendar_write but {CALENDAR_WRITE_ENV} is "
+                    "not `enabled`; set it or remove the grant"
                 )
             tokens.append(token)
         if not tokens:
@@ -366,6 +411,11 @@ def parse_config(raw: Mapping[str, Any], env: Mapping[str, str], data_dir: Path)
             max_search_days=_positive_int(
                 cal_raw.get("max_search_days", 730), f"{where}.calendar.max_search_days"
             ),
+            write=_calendar_write(
+                (defaults.get("calendar") or {}).get("write"),
+                (acct.get("calendar") or {}).get("write"),
+                where,
+            ),
         )
         exclude_groups = contacts_raw.get("exclude_groups") or []
         if not isinstance(exclude_groups, list) or not all(
@@ -395,7 +445,12 @@ def parse_config(raw: Mapping[str, Any], env: Mapping[str, str], data_dir: Path)
                 app_password=password,
             )
         )
-    return Config(accounts=tuple(accounts), data_dir=data_dir, mail_write=mail_write)
+    return Config(
+        accounts=tuple(accounts),
+        data_dir=data_dir,
+        mail_write=mail_write,
+        calendar_write=calendar_write,
+    )
 
 
 def send_warnings(config: Config) -> list[str]:

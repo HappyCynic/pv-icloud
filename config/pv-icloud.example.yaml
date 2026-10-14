@@ -41,7 +41,14 @@ defaults:
     # fetch each feed from its publisher. Off here: true makes outbound HTTPS requests to
     # those publishers (any public host; see docs/egress.md). false = listed, no events.
     subscriptions: false
-    # timezone: America/Chicago  # for date-only ranges; default: the iCloud calendar's zone
+    # timezone: America/Chicago  # for date-only ranges and new events; default: iCloud's
+    # Calendar writes are OFF. They need PV_ICLOUD_CALENDAR_WRITE=enabled in the environment
+    # and `calendar_write: true` on a token (below); see docs/adr/0005-opt-in-calendar-write.md.
+    # This setting has no effect until then.
+    write:
+      # Calendar display names, exact (case-sensitive, no globs): readable, never written.
+      # An account's own list adds to this one; a token's `protected_calendars` adds to both.
+      protected_calendars: []
   contacts:
     enabled: true              # false: no contacts tools; find_person uses mail only
     # Contacts in these groups are hidden from every tool (group names, globs allowed).
@@ -63,6 +70,13 @@ accounts:
       # send_to the token may send to anyone and the server warns at startup.
       #   mail_write: [send]
       #   send_to: [someone@example.com, "@example.org"]
+      # With PV_ICLOUD_CALENDAR_WRITE=enabled a token may create, change and delete events,
+      # one event or occurrence per call, in the account's own writable calendars (and
+      # calendars shared with it read-write; a change there is seen by everyone sharing it).
+      # Subscribed and protected calendars stay read-only; events with attendees or organised
+      # by someone else are refused. Writes share the token's max_writes_per_hour with mail.
+      #   calendar_write: true                  # default false
+      #   protected_calendars: [Family]         # added to the account's protected calendars
       - { label: laptop, sha256: "REPLACE_ME" }
     mail:
       folders: { exclude: [] }

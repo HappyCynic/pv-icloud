@@ -66,7 +66,7 @@ mail index is written to `/data` inside the container, never to the workspace.
 ## Ground rules for changes
 
 - **Read-only by default.** The IMAP read path only uses `EXAMINE` and `BODY.PEEK`; the
-  CalDAV and CardDAV clients can only send `PROPFIND` and `REPORT` (`dav.py`). Mail writes are
+  CalDAV and CardDAV read clients can only send `PROPFIND` and `REPORT` (`dav.py`). Mail writes are
   opt-in ([ADR-0004](docs/adr/0004-opt-in-mail-write.md)): only in `mail/imap_write.py` and
   `mail/smtp.py`, only behind `PV_ICLOUD_MAIL_WRITE=enabled` and a per-token grant, and only
   with the commands `CLAUDE.md` lists. Calendar event writes are opt-in too

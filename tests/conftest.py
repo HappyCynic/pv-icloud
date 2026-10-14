@@ -34,9 +34,12 @@ def make_config(
     alice_write=None,
     default_write=None,
     mail_write=False,
+    calendar_write=False,
+    default_calendar=None,
 ):
     """Accounts alice and bob. `alice_tokens` adds tokens to alice's (label -> extra keys,
-    hashed from `<label>-token`); `mail_write` sets PV_ICLOUD_MAIL_WRITE=enabled."""
+    hashed from `<label>-token`); `mail_write` sets PV_ICLOUD_MAIL_WRITE=enabled and
+    `calendar_write` PV_ICLOUD_CALENDAR_WRITE=enabled."""
     raw = {
         "defaults": {
             "mail": {
@@ -44,6 +47,7 @@ def make_config(
                 "max_age_days": max_age_days,
                 **({"write": default_write} if default_write is not None else {}),
             },
+            **({"calendar": default_calendar} if default_calendar is not None else {}),
         },
         "accounts": [
             {
@@ -72,6 +76,7 @@ def make_config(
         "PV_ICLOUD_BOB_ICLOUD_USER": "bob@icloud.com",
         "PV_ICLOUD_BOB_APP_PASSWORD": "app-pw",
         **({"PV_ICLOUD_MAIL_WRITE": "enabled"} if mail_write else {}),
+        **({"PV_ICLOUD_CALENDAR_WRITE": "enabled"} if calendar_write else {}),
     }
     return parse_config(raw, env, tmp_path / "data")
 

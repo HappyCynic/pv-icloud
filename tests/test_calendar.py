@@ -479,6 +479,86 @@ class TestEvent:
             service.event(vid, offset=-1)
 
 
+class TestPrincipalPathPeople:
+    """iCloud stores the account's own address as its principal path with `EMAIL=`."""
+
+    @pytest.fixture
+    def principal_event(self, fake):
+        fake.accounts["alice@icloud.com"].calendars[0].resources.append(
+            resource(
+                vevent(
+                    "own",
+                    "Planning",
+                    at(2, 9),
+                    at(2, 10),
+                    extra=(
+                        "ORGANIZER;CN=Alice;EMAIL=alice@example.net:/111/principal/",
+                        "ATTENDEE;CN=Alice;PARTSTAT=ACCEPTED;EMAIL=alice@example.net:"
+                        "/111/principal/",
+                        "ATTENDEE;CN=Nobody:urn:uuid:00000000-0000-0000-0000-000000000000",
+                    ),
+                )
+            )
+        )
+
+    def test_email_comes_from_the_email_parameter(self, service, principal_event):
+        [ev] = [e for e in service.events()["events"] if e["title"] == "Planning"]
+        assert ev["organizer"] == {"name": "Alice", "email": "alice@example.net"}
+        assert ev["attendees"] == [
+            {"name": "Alice", "email": "alice@example.net", "status": "accepted"},
+            {"name": "Nobody", "email": None},
+        ]
+        detail = service.event(ev["id"])
+        assert detail["organizer"]["email"] == "alice@example.net"
+        assert titles(service.search(query="alice@example.net")) == ["Planning"]
+
+
+class TestWriteReads:
+    """Read-only additions for calendar writes: privileges, one stored resource, addresses."""
+
+    def test_calendar_list_carries_privileges_without_extra_requests(self, service, fake):
+        fake.accounts["alice@icloud.com"].calendars[1].privileges = ("read",)
+        before = service.calendars()
+        cals = {c.name: c for c in service.client.calendars()}
+        assert cals["Home"].writable is True
+        assert cals["Work"].writable is False  # shared read-only
+        assert cals["TripIt"].writable is False  # subscribed
+        # The listing asks for the privileges in its one PROPFIND; calendar_list is unchanged.
+        assert "writable" not in json.dumps(before)
+        assert {m for m, _ in fake.requests} == {"PROPFIND"}
+
+    def test_privileges_imply_write_content(self):
+        from pv_icloud.cal.caldav import _writable
+
+        assert _writable({"write-content"}) and _writable({"write"}) and _writable({"all"})
+        assert not _writable({"read", "write-properties", "bind"})
+
+    def test_one_resource_read_unexpanded_with_its_etag(self, service, fake):
+        from .fakecaldav import etag
+
+        cal = next(c for c in service.client.calendars() if c.id == "home")
+        home = fake.accounts["alice@icloud.com"].calendars[0]
+        fake.requests.clear()
+        got = service.client.event_resource(cal, "/111/calendars/home/1.ics")
+        stored = home.resources[1]
+        assert got is not None and stored is not None
+        # XML parsing turns the CRLF line ends into LF; icalendar reads either.
+        assert got == (stored.replace("\r\n", "\n"), etag(stored))
+        assert service.client.event_resource(cal, "/111/calendars/home/99.ics") is None
+        assert [m for m, _ in fake.requests] == ["REPORT", "REPORT"]
+        assert all("calendar-multiget" in b and "<c:expand" not in b for b in fake.report_bodies)
+
+    def test_account_addresses_read_once(self, service, fake):
+        fake.accounts["alice@icloud.com"].addresses = ("alice@icloud.com", "Alice@Example.net")
+        first = service.client.account_addresses()
+        n = len(fake.requests)
+        assert service.client.account_addresses() == first
+        assert len(fake.requests) == n
+        assert first.emails == frozenset({"alice@icloud.com", "alice@example.net"})
+        assert first.principals == frozenset({"/111/principal/"})
+        assert {m for m, _ in fake.requests} == {"PROPFIND"}
+
+
 class TestClient:
     def test_refuses_write_methods(self, service):
         import httpx

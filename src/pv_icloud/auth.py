@@ -30,6 +30,9 @@ class AccountContext:
     protected_folders: tuple[str, ...] = ()
     max_writes_per_hour: int = MAX_WRITES_PER_HOUR
     send_to: tuple[str, ...] | None = None  # mail_send's recipient allowlist; None: any
+    # The token's own calendar write grant and protected calendars (ADR-0005).
+    calendar_write: bool = False
+    protected_calendars: tuple[str, ...] = ()
     # Keys the per-token write limit; the configured hash, so never shown in repr or logs.
     token_key: str = field(default="", repr=False)
 
@@ -59,6 +62,8 @@ class TokenTable:
                     protected_folders=t.protected_folders,
                     max_writes_per_hour=t.max_writes_per_hour,
                     send_to=t.send_to,
+                    calendar_write=t.calendar_write,
+                    protected_calendars=t.protected_calendars,
                     token_key=t.sha256,
                 ),
             )

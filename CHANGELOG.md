@@ -7,6 +7,40 @@ each version.
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in calendar writes ([ADR-0005](docs/adr/0005-opt-in-calendar-write.md)), off by
+  default:
+  - Deployment switch `PV_ICLOUD_CALENDAR_WRITE=enabled`, independent of the mail switch.
+    Without it nothing changes: the write code is not loaded, and a token with
+    `calendar_write: true` is a config error.
+  - Per-token `calendar_write: true` (default `false`). A token without it sees exactly the
+    tools and instructions it saw before.
+  - `calendar_event_create`: one event, single or recurring (daily, weekly on chosen days,
+    monthly or yearly, with `interval` and `count` or `until`), with title, timed or all-day
+    start and end, IANA time zone, location, notes and display alerts.
+  - `calendar_event_update`: changes the given fields of one event, or of one occurrence of
+    a series only; `clear` removes location, notes or alerts.
+  - `calendar_event_delete`: deletes one event, or one occurrence of a series.
+  - Only in the account's own calendars and calendars shared with it read-write; subscribed,
+    read-only shared and protected calendars fail like a missing calendar. Protected
+    calendars: `calendar.write.protected_calendars` in the defaults and per account, plus a
+    token's own `protected_calendars`.
+  - No attendees and no email: the tools take no attendees and refuse events with attendees
+    other than the account or organised by someone else, since iCloud emails attendees
+    whatever the client asks.
+  - Every update and delete re-reads the event and is conditional on it being unchanged; an
+    event changed in Calendar meanwhile fails with `the event changed in Calendar; read it
+    again`. Nothing is retried.
+  - Calendar writes count against the token's `max_writes_per_hour`, together with mail
+    writes, and are audited with `"write": true` and no event content (not even times).
+
+### Fixed
+
+- Calendar tools now show the account's own address as the organiser's or an attendee's
+  `email`. iCloud stores it as the account's principal path with the address in an `EMAIL=`
+  parameter, which was shown as `email: null`; `calendar_search` finds it too.
+
 ## [0.2.0] - 2026-10-13
 
 ### Added
