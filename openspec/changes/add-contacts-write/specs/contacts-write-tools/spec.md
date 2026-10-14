@@ -87,11 +87,13 @@ from the name parts, or from `organization` when there is no name part, in which
 card SHALL show as a company. Each value's label SHALL be written so that `contacts_get`
 returns the same label for it, in the form Apple Contacts writes: one `TYPE=` parameter per
 type, never a comma list; phones `mobile` as `TEL;TYPE=CELL;TYPE=VOICE`, `iPhone` as
-`TEL;TYPE=CELL;TYPE=IPHONE;TYPE=VOICE`, `home` and `work` as `TEL;TYPE=HOME;TYPE=VOICE` and
+`TEL;TYPE=IPHONE;TYPE=CELL;TYPE=VOICE`, `home` and `work` as `TEL;TYPE=HOME;TYPE=VOICE` and
 `TEL;TYPE=WORK;TYPE=VOICE`, `main` as `TEL;TYPE=MAIN`, `home fax` and `work fax` as
-`TEL;TYPE=HOME;TYPE=FAX` and `TEL;TYPE=WORK;TYPE=FAX`, `pager` as `TEL;TYPE=PAGER`, and every
-other phone with `TYPE=VOICE`; emails with `TYPE=INTERNET` first (`home` as
-`EMAIL;TYPE=INTERNET;TYPE=HOME`); and `preferred` as an extra `TYPE=PREF` parameter. Labels
+`TEL;TYPE=HOME;TYPE=FAX` and `TEL;TYPE=WORK;TYPE=FAX`, `pager` as `TEL;TYPE=PAGER`, an
+unlabelled phone as `TEL` and a phone in an item group as `itemN.TEL`, both without
+`TYPE=VOICE`; emails with `TYPE=INTERNET` first (`home` as `EMAIL;TYPE=INTERNET;TYPE=HOME`,
+unlabelled as `EMAIL;TYPE=INTERNET`, in an item group as `itemN.EMAIL;TYPE=INTERNET`); and
+`preferred` as a `TYPE=PREF` parameter after all the others. Labels
 with no `TYPE` form SHALL be written as an item group with `X-ABLabel`. The result SHALL
 include `id`, `name`, `groups` and `contacts_as_of`, and `id` SHALL be readable by
 `contacts_get` at once.
@@ -106,10 +108,17 @@ include `id`, `name`, `groups` and `contacts_as_of`, and `id` SHALL be readable 
 #### Scenario: Labels in Apple's form
 - **WHEN** a caller creates a contact with a `mobile` phone, an `iPhone` phone, a `work fax`
   phone and a preferred `home` email
-- **THEN** the stored card has `TEL;TYPE=CELL;TYPE=VOICE:`, `TEL;TYPE=CELL;TYPE=IPHONE;TYPE=VOICE:`,
-  `TEL;TYPE=WORK;TYPE=FAX:` and `EMAIL;TYPE=INTERNET;TYPE=HOME;TYPE=PREF:` lines, and
-  `contacts_get` returns the labels `mobile`, `iPhone`, `work fax` and `home`, the email
-  preferred
+- **THEN** the stored card has `TEL;TYPE=CELL;TYPE=VOICE:`,
+  `TEL;TYPE=IPHONE;TYPE=CELL;TYPE=VOICE:`, `TEL;TYPE=WORK;TYPE=FAX:` and
+  `EMAIL;TYPE=INTERNET;TYPE=HOME;TYPE=PREF:` lines, and `contacts_get` returns the labels
+  `mobile`, `iPhone`, `work fax` and `home`, the email preferred
+
+#### Scenario: Unlabelled, item-group and preferred values
+- **WHEN** a caller creates a contact with an unlabelled preferred phone, a phone labelled
+  `Boat` and a preferred email labelled `school`
+- **THEN** the stored card has a `TEL;TYPE=PREF:` line, `item1.TEL:` with
+  `item1.X-ABLabel:Boat`, and `item2.EMAIL;TYPE=INTERNET;TYPE=PREF:` with
+  `item2.X-ABLabel:_$!<School>!$_`
 
 #### Scenario: Company card
 - **WHEN** a caller creates a contact with only `organization` `Widgets` and a phone

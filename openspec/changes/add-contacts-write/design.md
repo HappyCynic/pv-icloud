@@ -144,12 +144,14 @@ Results: create and update return `id`, `name`, `groups` and `contacts_as_of`, i
 values are written exactly as Apple Contacts writes them, so that reading a new value back
 gives the label that was given and Apple's apps see the same card they would have written.
 Each type is its own `TYPE=` parameter, in the order below, never a comma list
-(`TEL;TYPE=CELL;TYPE=VOICE`, not `TEL;TYPE=CELL,VOICE` or `TEL;TYPE=CELL`):
+(`TEL;TYPE=CELL;TYPE=VOICE`, not `TEL;TYPE=CELL,VOICE` or `TEL;TYPE=CELL`). These are the
+parameter orders of cards Apple's apps write, checked by the maintainer on the live address
+book (2026-10-14):
 
 | Label given (case-insensitive) | Written as |
 | --- | --- |
 | `mobile` (phones) | `TEL;TYPE=CELL;TYPE=VOICE` |
-| `iPhone` (phones) | `TEL;TYPE=CELL;TYPE=IPHONE;TYPE=VOICE` |
+| `iPhone` (phones) | `TEL;TYPE=IPHONE;TYPE=CELL;TYPE=VOICE` |
 | `home`, `work` (phones) | `TEL;TYPE=HOME;TYPE=VOICE` / `TEL;TYPE=WORK;TYPE=VOICE` |
 | `main` (phones) | `TEL;TYPE=MAIN` |
 | `home fax`, `work fax` (phones) | `TEL;TYPE=HOME;TYPE=FAX` / `TEL;TYPE=WORK;TYPE=FAX` |
@@ -160,12 +162,14 @@ Each type is its own `TYPE=` parameter, in the order below, never a comma list
 | any other label | item group with `X-ABLabel:<label>` |
 | none | no label |
 
-Every email gets `TYPE=INTERNET` first (an unlabelled one is `EMAIL;TYPE=INTERNET`), and every
-phone outside the `main`, fax and `pager` rows gets `TYPE=VOICE` last, including unlabelled
-phones (`TEL;TYPE=VOICE`) and phones with an item-group label (`itemN.TEL;TYPE=VOICE`).
-`preferred: true` adds `TYPE=PREF` as one more parameter after the others, on emails and
-phones (`EMAIL;TYPE=INTERNET;TYPE=HOME;TYPE=PREF`). Parameter names and values are written in
-upper case. The fake CardDAV server's fixture cards use these exact forms, and a test pins
+`TYPE=VOICE` is written only in the `mobile`, `iPhone`, `home` and `work` phone rows. An
+unlabelled phone is plain `TEL`, and a phone in an item group (any `X-ABLabel`) is plain
+`itemN.TEL`, both without `TYPE=VOICE`. Every email gets `TYPE=INTERNET` first: an unlabelled
+one is `EMAIL;TYPE=INTERNET`, and one in an item group is `itemN.EMAIL;TYPE=INTERNET`, with no
+`HOME` or `WORK`. `preferred: true` adds `TYPE=PREF` as the last parameter, on phones and
+emails alike (`TEL;TYPE=CELL;TYPE=VOICE;TYPE=PREF`, `TEL;TYPE=PREF`, `itemN.TEL;TYPE=PREF`,
+`EMAIL;TYPE=INTERNET;TYPE=HOME;TYPE=PREF`, `itemN.EMAIL;TYPE=INTERNET;TYPE=PREF`). Parameter
+names and type values are written in upper case. The fake CardDAV server's fixture cards use these exact forms, and a test pins
 both the written bytes of every row and the label `contacts_get` reads back. Item group names
 are `item<N>` with `N` one more than the highest in the card. Dates are `X-ABDATE` and related
 names `X-ABRELATEDNAMES` in item groups; a birthday without a year is written as Apple does,
@@ -428,18 +432,14 @@ Answered by the maintainer on #25 (2026-10-14), with a read-only check of a live
    the old organization); custom display names are kept (decision 4).
 4. **`REV` is bumped** on every card an update writes (decision 4).
 5. **A grant on an account with `contacts.enabled: false` is a config error** (decision 1).
-6. **Labels are written in Apple's exact forms**, separate `TYPE=` parameters with
-   `TYPE=VOICE` on phones and `TYPE=INTERNET` on emails, pinned in the fake and the label
-   tests (decision 3).
+6. **Labels are written in Apple's exact forms** (decision 3): separate `TYPE=` parameters,
+   `TYPE=IPHONE` before `TYPE=CELL`, `TYPE=VOICE` only on phones with a built-in voice type,
+   `TYPE=INTERNET` first on emails, `TYPE=PREF` always last; unlabelled and item-group
+   phones without `TYPE=VOICE`, item-group emails without `HOME` or `WORK`. Pinned in the
+   fake's fixture cards and the label tests.
+7. **Group cards get a `REV` bump too**: every card an update writes, group cards included
+   (30 of 36 live group cards carry `REV`).
 
 ## Open Questions
 
-1. **Group cards get a `REV` bump too** (decisions 4 and 5). The answer to question 4 says
-   "on every update"; this design reads that as every card an update writes, so a
-   membership change bumps the group card's `REV` (the contact card is not written). The
-   alternative is to bump only contact cards.
-2. **`TYPE=VOICE` on unlabelled and item-group-labelled phones, and `TYPE=PREF` on preferred
-   phones** (decision 3) extend the stated forms by analogy. Task 10.1 checks them against
-   what Apple Contacts writes.
-
-The maintainer live-tests on a test contact before merge (task 10.1).
+None. The maintainer live-tests on a test contact before merge (task 10.1).

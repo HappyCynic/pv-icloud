@@ -45,8 +45,9 @@ Each group ends with its tests passing.
   `X-APPLE-OMIT-YEAR`, `X-ABShowAs:COMPANY`, unknown `X-` properties, a custom display name
   that differs from the name parts, a card with `REV` and one without, a card with two `NOTE`
   lines, a card with two `REV` lines, a vCard 4.0 card), with phones and emails in Apple's
-  exact label forms from design decision 3 (separate `TYPE=` parameters, `TYPE=VOICE` on
-  phones, `TYPE=INTERNET` on emails, `TYPE=PREF`), and group cards with members hidden by an excluded group. Writes to
+  exact label forms from design decision 3 (separate `TYPE=` parameters, `TYPE=IPHONE`
+  before `TYPE=CELL`, `TYPE=VOICE` only on built-in voice types, `TYPE=INTERNET` first on
+  emails, `TYPE=PREF` last), and group cards with members hidden by an excluded group. Writes to
   the address book collection, the home, a non-`.vcf` or nested path, any CalDAV URL, a
   `DELETE` of a group card or the me-card, and any other method are recorded as forbidden
   write attempts. Verify the existing contacts and `find_person` tests still pass.
@@ -156,7 +157,7 @@ Each group ends with its tests passing.
 - [ ] 10.1 With a test token on a test contact: create a contact with labelled values (one per
   row of the label table, plus an unlabelled, a custom-labelled and a preferred phone) and
   confirm Apple Contacts shows the same labels and that a card Apple Contacts writes with
-  the same labels has the same `TYPE` parameters (design open question 2); update one field
+  the same labels has the same `TYPE` parameters (design decision 3); update one field
   on a card that has a photo and confirm the photo and every other field survive and `REV`
   is bumped; change a name part on a card with a custom display name and confirm it is kept;
   add the contact to and remove it from a test group; delete it and record whether iCloud
