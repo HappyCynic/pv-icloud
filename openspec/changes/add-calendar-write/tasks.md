@@ -73,7 +73,7 @@ approved the proposal. Each group ends with its tests passing.
 
 ## 5. iCalendar composition
 
-- [ ] 5.1 Write tests for `src/pv_icloud/cal/compose.py`: new timed event with `TZID` and
+- [x] 5.1 Write tests for `src/pv_icloud/cal/compose.py`: new timed event with `TZID` and
   `VTIMEZONE` (offset converted, no offset read in the zone, default zone); all-day event
   with inclusive `end`; default ends; `RRULE` from `recurrence`; alerts as `ACTION:DISPLAY`
   `VALARM`s; no `ORGANIZER` or `ATTENDEE` ever written; update of given fields only and
@@ -85,7 +85,7 @@ approved the proposal. Each group ends with its tests passing.
   address set, principal path with a matching `EMAIL=` or equal to the principal URL,
   case-insensitive; anything else is someone else); every input limit in the
   `calendar-write-tools` spec refused with the field named.
-- [ ] 5.2 Implement `src/pv_icloud/cal/compose.py` (SPDX header) with `icalendar`, sharing
+- [x] 5.2 Implement `src/pv_icloud/cal/compose.py` (SPDX header) with `icalendar`, sharing
   the address helper with `cal/parse.py`; verify 5.1 passes.
 
 ## 6. Write path

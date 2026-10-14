@@ -112,7 +112,7 @@ formats of `calendar_event`, with `id` naming the event's first occurrence and r
 #### Scenario: Weekly recurring event
 - **WHEN** a caller creates `Standup` with `recurrence` `{frequency: weekly, weekdays: [MO,
   WE], count: 10}`
-- **THEN** iCloud stores `RRULE:FREQ=WEEKLY;BYDAY=MO,WE;COUNT=10` and the result has
+- **THEN** iCloud stores `RRULE:FREQ=WEEKLY;COUNT=10;BYDAY=MO,WE` and the result has
   `recurring` true
 
 #### Scenario: Attendees passed anyway
