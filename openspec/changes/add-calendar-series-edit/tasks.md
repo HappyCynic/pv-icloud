@@ -130,7 +130,7 @@ ADR-0007 (design decision 11). Each group ends with its tests passing.
 
 ## 6. Docs
 
-- [ ] 6.1 Update docs/design.md (Tools table; the calendar write section's "A whole series is
+- [x] 6.1 Update docs/design.md (Tools table; the calendar write section's "A whole series is
   never changed or deleted in one call"; a series-edit paragraph on the modes, matching
   exceptions and `drop_unmatched`, the Apple-format split and its rollback, recurrence sets
   and their limits; the recurrence notes), README.md (tool list and what a series edit can
@@ -140,7 +140,7 @@ ADR-0007 (design decision 11). Each group ends with its tests passing.
 
 ## 7. Checks
 
-- [ ] 7.1 Run `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`,
+- [x] 7.1 Run `uv run pytest`, `uv run ruff check .`, `uv run ruff format --check .`,
   `uv run mypy` and `openspec validate --all --strict`; all pass.
 
 ## 8. Live check (maintainer, before merge)
