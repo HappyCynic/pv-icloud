@@ -110,7 +110,7 @@ ADR-0007 (design decision 11). Each group ends with its tests passing.
 
 ## 5. Tool, instructions and audit
 
-- [ ] 5.1 Write failing tests in `tests/test_server.py`: `calendar_series_update` is listed
+- [x] 5.1 Write failing tests in `tests/test_server.py`: `calendar_series_update` is listed
   only to tokens with `calendar_write` and the switch on, with `destructiveHint` true; a token
   without the grant gets the unknown-tool error and iCloud sees no request; the description
   names the four modes, `preview`, `drop_unmatched`, discarded and unmatched exceptions, that
@@ -123,7 +123,7 @@ ADR-0007 (design decision 11). Each group ends with its tests passing.
   included) and holds no title, time, zone or calendar name; unknown arguments such as
   `attendees` are refused. Update `tests/snapshots/read_only_surface.json` only if a
   read-only token's surface changes (it must not).
-- [ ] 5.2 Register the tool in `src/pv_icloud/server.py` (`CALENDAR_WRITE_TOOLS`,
+- [x] 5.2 Register the tool in `src/pv_icloud/server.py` (`CALENDAR_WRITE_TOOLS`,
   description, `CALENDAR_WRITE_TEXT`, unknown-argument guard), say in
   `calendar_event_update`'s and `calendar_event_delete`'s descriptions that whole-series
   changes use `calendar_series_update`, and verify 5.1 passes.
