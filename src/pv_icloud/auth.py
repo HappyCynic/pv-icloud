@@ -33,6 +33,8 @@ class AccountContext:
     # The token's own calendar write grant and protected calendars (ADR-0005).
     calendar_write: bool = False
     protected_calendars: tuple[str, ...] = ()
+    # The token's own contact write actions (ADR-0006); empty for a read-only token.
+    contacts_write: frozenset[str] = frozenset()
     # Keys the per-token write limit; the configured hash, so never shown in repr or logs.
     token_key: str = field(default="", repr=False)
 
@@ -64,6 +66,7 @@ class TokenTable:
                     send_to=t.send_to,
                     calendar_write=t.calendar_write,
                     protected_calendars=t.protected_calendars,
+                    contacts_write=t.contacts_write,
                     token_key=t.sha256,
                 ),
             )

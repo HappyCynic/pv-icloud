@@ -5,7 +5,7 @@ Each group ends with its tests passing.
 
 ## 1. Policy tests
 
-- [ ] 1.1 Write failing tests in `tests/test_repo_policy.py`: `"PUT"` and `"DELETE"` are used
+- [x] 1.1 Write failing tests in `tests/test_repo_policy.py`: `"PUT"` and `"DELETE"` are used
   as HTTP methods only in `src/pv_icloud/cal/caldav_write.py` and
   `src/pv_icloud/contacts/carddav_write.py`; `dav.READ_METHODS` is still exactly `PROPFIND`
   and `REPORT`; no source uses `MKCOL`, `PROPPATCH`, `MOVE`, `POST`, `COPY`, `ACL`, `LOCK` or
@@ -16,21 +16,21 @@ Each group ends with its tests passing.
 
 ## 2. Deployment switch, configuration and auth
 
-- [ ] 2.1 Write tests in `tests/test_units.py` for `PV_ICLOUD_CONTACTS_WRITE`: unset, empty
+- [x] 2.1 Write tests in `tests/test_units.py` for `PV_ICLOUD_CONTACTS_WRITE`: unset, empty
   and `disabled` are off; `enabled` is on; other values are a config error naming the
   variable; a non-empty `contacts_write` while off is a config error naming account, label,
   `contacts_write` and the variable; a grant on an account with `contacts.enabled: false` is
   a config error naming account, label, `contacts_write` and `contacts.enabled`; the mail,
   calendar and contacts switches are independent.
-- [ ] 2.2 Write tests for the token key `contacts_write`: default empty; `[create]`,
+- [x] 2.2 Write tests for the token key `contacts_write`: default empty; `[create]`,
   `[update, delete]` and all three load; repeated actions load once; a non-list (`true`,
   `"update"`) or an unknown action (`merge`) is rejected naming account, label, key and, for
   an unknown action, the allowed actions; `max_writes_per_hour` still defaults to 30.
-- [ ] 2.3 Implement in `src/pv_icloud/config.py` (`TokenEntry.contacts_write`,
+- [x] 2.3 Implement in `src/pv_icloud/config.py` (`TokenEntry.contacts_write`,
   `Config.contacts_write`, the switch) and verify 2.1–2.2 pass.
-- [ ] 2.4 Write a test that two tokens of one account resolve to `AccountContext`s with their
+- [x] 2.4 Write a test that two tokens of one account resolve to `AccountContext`s with their
   own `contacts_write`; extend `src/pv_icloud/auth.py` and verify it passes.
-- [ ] 2.5 Document the switch and `contacts_write` (off) in `config/pv-icloud.example.yaml`
+- [x] 2.5 Document the switch and `contacts_write` (off) in `config/pv-icloud.example.yaml`
   and verify the example still loads in the config tests.
 
 ## 3. Fake CardDAV server
