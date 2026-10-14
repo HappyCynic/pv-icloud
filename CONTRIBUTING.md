@@ -72,8 +72,11 @@ mail index is written to `/data` inside the container, never to the workspace.
   with the commands `CLAUDE.md` lists. Calendar event writes are opt-in too
   ([ADR-0005](docs/adr/0005-opt-in-calendar-write.md)): only in `cal/caldav_write.py`, only
   behind `PV_ICLOUD_CALENDAR_WRITE=enabled` and `calendar_write: true`, only conditional
-  `PUT`/`DELETE` of one event in the account's own calendars, and never with attendees. Any
-  other write needs a new ADR first.
+  `PUT`/`DELETE` of one event in a calendar the account may write, and never with attendees.
+  Contact writes are opt-in as well ([ADR-0006](docs/adr/0006-opt-in-contact-write.md)): only
+  in `contacts/carddav_write.py`, only behind `PV_ICLOUD_CONTACTS_WRITE=enabled` and a
+  per-token grant, conditional and lossless (only the properties asked for change). Any other
+  write needs a new ADR first.
 - **Content is untrusted.** Mail, calendar and contact text can contain prompt-injection
   attempts.
   Return it as data with `content_trust: "untrusted"`; never let it change server behaviour.

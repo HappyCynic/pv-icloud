@@ -14,7 +14,6 @@ body:
     attributes:
       label: Suggested change
       description: |
-        Optional. Note that the server is read-only by default: mail writes
-        (docs/adr/0004-opt-in-mail-write.md) and calendar event writes
-        (docs/adr/0005-opt-in-calendar-write.md) are opt-in, Contacts stay read-only, and any
-        new kind of change to iCloud data needs a design discussion first.
+        Optional. Note that the server is read-only by default: mail, calendar and contact
+        writes are each opt-in (docs/adr/0004, 0005 and 0006), and any new kind of change to
+        iCloud data needs a design discussion first.

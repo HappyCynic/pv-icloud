@@ -8,7 +8,8 @@
   change the threat model: prompt injection in untrusted mail could now cause actions, and a
   sent message cannot be recalled. Calendar and Contacts are not part of this decision and
   stay read-only. *(Amended 2026-10-14: calendar event writes are decided separately in
-  [ADR-0005](0005-opt-in-calendar-write.md); Contacts stay read-only.)*
+  [ADR-0005](0005-opt-in-calendar-write.md), contact writes in
+  [ADR-0006](0006-opt-in-contact-write.md).)*
 
 ## Decision
 
