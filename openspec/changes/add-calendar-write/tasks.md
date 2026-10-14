@@ -40,7 +40,7 @@ approved the proposal. Each group ends with its tests passing.
 
 ## 3. Fake CalDAV server
 
-- [ ] 3.1 Extend `tests/fakecaldav.py`: an ETag per event resource that changes on every
+- [x] 3.1 Extend `tests/fakecaldav.py`: an ETag per event resource that changes on every
   change; a single-href `calendar-multiget` on the calendar returning the stored data and
   `getetag` (a Depth 0 `calendar-query` on a resource URL answered 403, as on iCloud);
   `calendar-query` with `<C:expand>` expanding stored `RRULE` masters, `EXDATE`s and
