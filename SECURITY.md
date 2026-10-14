@@ -20,8 +20,9 @@ assumes the server runs on hardware the account owner controls and is reached ov
 network.
 
 **Read-only by default.** Unless mail writes are enabled (below), no tool sends, moves,
-deletes or flags mail. Calendar and Contacts are always read-only: the CalDAV/CardDAV client
-can only send `PROPFIND` and `REPORT`. The IMAP read path opens folders with `EXAMINE` and
+deletes or flags mail, and unless calendar writes are enabled (below), no tool changes a
+calendar. Contacts are always read-only, and the shared CalDAV/CardDAV client can only send
+`PROPFIND` and `REPORT`. The IMAP read path opens folders with `EXAMINE` and
 fetches with `BODY.PEEK`, so reading never changes read state. A way to change iCloud data
 without the switch and a grant described below is a vulnerability.
 
@@ -35,6 +36,17 @@ and each token has a write rate limit (default 30 per hour). These are vulnerabi
 write without the switch and the matching grant; any permanent deletion; any change to a
 protected folder; a send to an address outside the token's `send_to` list; any IMAP write
 command other than those ADR-0004 lists.
+
+**Optional calendar write access** ([ADR-0005](docs/adr/0005-opt-in-calendar-write.md);
+being implemented). Writes need both `PV_ICLOUD_CALENDAR_WRITE=enabled` and
+`calendar_write: true` on the token. They create, update or delete one event at a time, only in
+the account's own calendars (never subscribed or shared ones, never `protected_calendars`),
+always as conditional requests that cannot overwrite a change made elsewhere, and never with
+attendees: iCloud emails invitations for any attendee, so events with attendees other than
+the account cannot be changed through pv-icloud. These are vulnerabilities: a calendar write
+without the switch and the grant; a write to a calendar the rules above exclude; any write
+that makes iCloud email someone other than the account; any DAV method other than those
+ADR-0005 lists.
 
 Write access raises the stakes of prompt injection: untrusted mail could try to make a model
 move, delete, draft or send. The defences above lower that risk but cannot remove it, and a

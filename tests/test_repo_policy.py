@@ -12,9 +12,9 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 OWNER = "@mwklein"
-# Owned before they exist (e.g. the modules allowed to change mail, ADR-0004, before their
-# change lands). Remove a path from here once it exists.
-PLANNED_PATHS: set[str] = set()
+# Owned before they exist: the module allowed to change calendars (ADR-0005), created by the
+# add-calendar-write change. Remove a path from here once it exists.
+PLANNED_PATHS: set[str] = {"/src/pv_icloud/cal/caldav_write.py"}
 
 
 def _codeowners() -> dict[str, list[str]]:
@@ -40,6 +40,7 @@ def _codeowners() -> dict[str, list[str]]:
         "/src/pv_icloud/mail/imap.py",
         "/src/pv_icloud/mail/imap_write.py",
         "/src/pv_icloud/mail/smtp.py",
+        "/src/pv_icloud/cal/caldav_write.py",
         "/CLAUDE.md",
         "/.claude/",
         "/openspec/config.yaml",
@@ -86,6 +87,27 @@ def test_write_rule_is_summarised_and_documented() -> None:
     security = (ROOT / "SECURITY.md").read_text()
     assert "Read-only by default" in security and "PV_ICLOUD_MAIL_WRITE=enabled" in security
     assert (ROOT / "docs" / "adr" / "0004-opt-in-mail-write.md").exists()
+
+
+def test_calendar_write_rule_is_kept_and_documented() -> None:
+    text = " ".join(_claude_md().split())  # independent of line wrapping
+    for phrase in (
+        "Calendar writes are opt-in and confined",
+        "src/pv_icloud/cal/caldav_write.py",
+        "PV_ICLOUD_CALENDAR_WRITE=enabled",
+        "`calendar_write: true`",
+        "`If-None-Match: *`",
+        "`Schedule-Reply: F`",
+        "never write attendees",
+        "`MKCALENDAR`",
+        "docs/adr/0005-opt-in-calendar-write.md",
+    ):
+        assert phrase in text, phrase
+    config = (ROOT / "openspec" / "config.yaml").read_text()
+    assert "PV_ICLOUD_CALENDAR_WRITE=enabled" in config and "0005-opt-in-calendar-write" in config
+    security = (ROOT / "SECURITY.md").read_text()
+    assert "PV_ICLOUD_CALENDAR_WRITE=enabled" in security
+    assert (ROOT / "docs" / "adr" / "0005-opt-in-calendar-write.md").exists()
 
 
 # --- IMAP and DAV call sites (CLAUDE.md hard rules, ADR-0004) ----------------------------
