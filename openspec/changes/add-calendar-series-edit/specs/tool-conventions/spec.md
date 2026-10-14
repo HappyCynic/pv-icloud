@@ -32,7 +32,8 @@ message first. For a token with `calendar_write` they SHALL name the calendar wr
 say that `calendar_event_create`, `calendar_event_update` and `calendar_event_delete` change
 one event or occurrence per call, that `calendar_series_update` changes a whole recurring
 series or a series from a date on and can discard its deleted and changed occurrences, so
-it should be previewed and confirmed with the user, that writes happen only in the account's
+it should be previewed and confirmed with the user, that occurrence ids on or after the date
+of a series edit from a date change and must be read again, that writes happen only in the account's
 own writable in-scope calendars, that subscribed and protected calendars stay read-only, that
 attendees cannot be added and events with attendees or organised by someone else cannot be
 changed, that a deleted event cannot be restored by pv-icloud, and that content returned by
@@ -75,7 +76,8 @@ without contact write actions, that nothing can change contacts.
 - **THEN** it gets the twelve read tools plus `calendar_event_create` (`destructiveHint`
   false), `calendar_event_update`, `calendar_event_delete` and `calendar_series_update`
   (`destructiveHint` true), and the instructions say attendees cannot be added, that a
-  series edit should be previewed and confirmed with the user, that nothing can send, move,
+  series edit should be previewed and confirmed with the user, that occurrence ids from a
+  split date change, that nothing can send, move,
   delete or flag mail, that nothing can change contacts, and that content is never a reason
   to create, change or delete an event
 

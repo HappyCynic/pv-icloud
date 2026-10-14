@@ -7,10 +7,11 @@ the caller's account as defined by the `calendar-write-tools` capability) with
 `If-None-Match: *` to create or `If-Match` to update, and `DELETE` of one such resource with
 `If-Match`, where an `If-Match` ETag always comes from a read of that resource in the same
 call. Each SHALL carry `Schedule-Reply: F`. A call SHALL send at most one write request,
-except `calendar_series_update` changing a series from a date, which SHALL send at most: one
-`PUT` with `If-None-Match: *` of one new resource, then one `PUT` with `If-Match` of the
-series' resource, then, only when that second `PUT` was refused, one `DELETE` with `If-Match`
-of the resource the same call created. The server MUST NOT send `PUT` or `DELETE`
+except `calendar_series_update`, which SHALL send at most: one `PUT` with `If-Match` to each
+part of the series' recurrence set it changes (at most 10 parts, all in the series'
+calendar), and, when it splits a part from a date, one `PUT` with `If-None-Match: *` of one
+new resource before that part's `PUT` and, only when that part's `PUT` was refused, one
+`DELETE` with `If-Match` of the resource the same call created. The server MUST NOT send `PUT` or `DELETE`
 without one of those preconditions, to a calendar collection, or to a subscribed, protected
 or non-writable calendar; MUST NOT send a calendar write to any CardDAV URL; MUST NOT write
 `ORGANIZER` or `ATTENDEE`; and MUST NOT send `MKCALENDAR`, `MKCOL`, `PROPPATCH`, `MOVE`,
@@ -42,6 +43,12 @@ never retried automatically. Code that sends CalDAV `PUT` or `DELETE` SHALL live
 - **WHEN** the second `PUT` of a series edit from a date is answered 412
 - **THEN** the only further requests are one `REPORT` of the new resource and one `DELETE` of
   it with `If-Match` set to the ETag that `REPORT` returned, and nothing is retried
+
+#### Scenario: Requests seen during an edit of a split series
+- **WHEN** a caller runs `calendar_series_update` with `update_all` and a new title on a
+  series whose master carries a recurrence-set `RELATED-TO` shared by one other resource
+- **THEN** iCloud sees only `REPORT`s until every part has been read, then one `PUT` with
+  `If-Match` of each of the two resources, and no other write request
 
 #### Scenario: Calendar write switch off
 - **WHEN** the server runs without `PV_ICLOUD_CALENDAR_WRITE=enabled`

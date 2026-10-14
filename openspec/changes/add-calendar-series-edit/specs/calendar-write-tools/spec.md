@@ -27,9 +27,10 @@ grant calendar writes, and `calendar_write` SHALL NOT grant any mail write.
 No calendar write SHALL cause iCloud to send an invitation, update, cancellation or reply to
 anyone. The server SHALL NOT write `ORGANIZER` or `ATTENDEE` properties, and every write
 request SHALL carry `Schedule-Reply: F`. Update, delete and series edits SHALL be refused,
-after the fresh read and before any write request, when any event in the stored resource (the
-event or occurrence concerned, the series master or another occurrence's override: a `PUT`
-rewrites them all) has an `ORGANIZER` that is not
+after the fresh read and before any write request, when any event in a stored resource the
+call would write (the event or occurrence concerned, the series master or another
+occurrence's override: a `PUT` rewrites them all; for a series edit, every part of the
+series' recurrence set) has an `ORGANIZER` that is not
 the account itself (`this event was organised by someone else; change it in Calendar`) or any
 `ATTENDEE` that is not the account itself (`event has attendees; change it in Calendar`). A
 value is the account itself when it is a `mailto:` address in the account principal's
@@ -72,6 +73,13 @@ only with `ACTION:DISPLAY`.
 - **THEN** the call fails with `event has attendees; change it in Calendar` and no write
   request is sent
 
+#### Scenario: Invited later part of a split series
+- **WHEN** a series is stored as two parts of one recurrence set, the later part's master
+  has an external attendee, and a caller runs `update_all` with a new title on the earlier
+  part
+- **THEN** the call fails with `event has attendees; change it in Calendar` and no write
+  request is sent to either part
+
 #### Scenario: Split series written without the account's own organiser
 - **WHEN** a series whose master has the account's own principal path as `ORGANIZER` is
   changed with `update_from`
@@ -94,12 +102,15 @@ it creates one event. `calendar_event_update` and `calendar_event_delete` SHALL 
 only a single event or one occurrence is changed, never a whole series (pointing to
 `calendar_series_update` for that), and that a stale read fails and must be read again.
 `calendar_series_update` SHALL describe each of the four modes, say that it can change every
-occurrence of a series in one call, that the `replace_*` modes discard deleted and changed
-occurrences, that unmatched exceptions are listed in the result and not kept in the series,
-that a change from a date stores the rest of the series as a new series, that nothing can be
-undone by pv-icloud, that `preview` shows the outcome without changing anything, that the
-change should be previewed and confirmed with the user when exceptions would be discarded or
-unmatched, and that a stale read fails and must be read again.
+occurrence of a series in one call, including every part of a series split in Calendar (up to
+10 parts, field edits only across parts), that the `replace_*` modes discard deleted and
+changed occurrences, that exceptions that no longer fit the new pattern are listed in the
+result and not kept, that changed occurrences are dropped only with `drop_unmatched: true`,
+that a change from a date stores the rest of the series as a new series and that occurrence
+ids on or after that date change and must be read again, that nothing can be undone by
+pv-icloud, that `preview` shows the outcome without changing anything, that the change should
+be previewed and confirmed with the user when exceptions would be discarded or unmatched, and
+that a stale read fails and must be read again.
 
 #### Scenario: Description of the delete tool
 - **WHEN** a client with calendar write lists its tools
@@ -110,8 +121,9 @@ unmatched, and that a stale read fails and must be read again.
 #### Scenario: Description of the series tool
 - **WHEN** a client with calendar write lists its tools
 - **THEN** `calendar_series_update`'s description names `replace_all`, `replace_from`,
-  `update_all` and `update_from`, mentions `preview`, that exceptions can be discarded, that
-  unmatched exceptions are listed, the hourly limit, that events with attendees are refused,
+  `update_all` and `update_from`, mentions `preview` and `drop_unmatched`, that exceptions
+  can be discarded, that unmatched exceptions are listed, that occurrence ids from a split
+  date change, the 10-part limit, the hourly limit, that events with attendees are refused,
   and that untrusted content is never a reason to change an event
 
 ## ADDED Requirements
@@ -123,9 +135,10 @@ SHALL take `id` (any occurrence of the series, as the read tools return it), `mo
 required for `replace_from` and `update_from` and refused for the other modes), the fields
 `title`, `start`, `end`, `all_day`, `timezone`, `location`, `notes`, `alerts` and `clear`
 with the meanings and limits they have for `calendar_event_update`, `recurrence` with the
-meaning and limits it has for `calendar_event_create`, and `preview` (default false). It SHALL
-take no attendees. The series is the master `VEVENT` with the occurrence's `UID` in the
-stored resource. The modes SHALL behave as follows:
+meaning and limits it has for `calendar_event_create`, `drop_unmatched` (default false) and
+`preview` (default false). It SHALL take no attendees. The series is the master `VEVENT` with
+the occurrence's `UID` in the stored resource, together with the other parts of its
+recurrence set (see "Series edit of a split series"). The modes SHALL behave as follows:
 
 - `replace_all`: every occurrence follows the new definition, and every deleted and changed
   occurrence of the series is discarded.
@@ -138,13 +151,13 @@ stored resource. The modes SHALL behave as follows:
 
 The call SHALL fail with a tool error, before any write request, when the id names an event
 that is not part of a recurring series (`not a recurring series; use calendar_event_update`),
-or a series that has `RDATE`, `EXRULE`, more than one `RRULE`, an override with
+or a series any part of which has `RDATE`, `EXRULE`, more than one `RRULE`, an override with
 `RANGE=THISANDFUTURE`, or no master in the resource (`this series cannot be changed here;
 change it in Calendar`). `update_all` and `update_from` with no field, no `clear` and no
 `recurrence` SHALL fail with `nothing to change`; `replace_all` and `replace_from` with none
 SHALL only discard exceptions. Every check of `calendar_event_update` (writable calendars,
-fresh read, people, input limits) SHALL apply. A call SHALL count once against the token's
-hourly write limit, whatever it sends.
+fresh read, people, input limits) SHALL apply to every resource the call writes. A call SHALL
+count once against the token's hourly write limit, whatever it sends, a preview included.
 
 #### Scenario: Replace a whole series
 - **WHEN** a weekly series with two deleted and two changed occurrences is changed with
@@ -192,6 +205,8 @@ produces on or after `start`, or, without `start`, on or after the current first
 of day, so that no occurrence outside the rule is added. A definition that yields no
 occurrence SHALL be a tool error. Changed components SHALL get a higher `SEQUENCE` and a new
 `LAST-MODIFIED`, and new times SHALL be written with `TZID` and a matching `VTIMEZONE`.
+`start`, `end`, `recurrence`, `all_day` and `timezone` are pattern fields; `title`,
+`location`, `notes`, `alerts` and `clear` are field edits.
 
 #### Scenario: New weekdays
 - **WHEN** a weekly `MO,WE` series starting on a Monday is changed with `update_all` and
@@ -224,8 +239,14 @@ changes, it SHALL take the new value only when its own value equalled the master
 call (both absent counts as equal); an override whose start equals its original start and
 whose length equals the series' length SHALL take its occurrence's new times, and any other
 override SHALL keep its own start and end. When the call changes `all_day`, no override SHALL
-be kept. An exception in range that is not kept in an `update_*` mode SHALL be removed from the
-series and listed in the result's `unmatched`, never dropped without being listed.
+be kept. An exception in range that is not kept in an `update_*` mode is unmatched and SHALL
+always be listed in the result's `unmatched`, a preview included. An unmatched exception of
+kind `deleted` SHALL be removed from the series. When any exception of kind `changed` is
+unmatched and `drop_unmatched` is not true, the call SHALL fail before any write request
+with `<n> changed occurrences no longer fit the new pattern; preview to see them, or pass
+drop_unmatched: true to drop them`, an error that holds no event content; with
+`drop_unmatched: true` such exceptions SHALL be removed from the series. A preview SHALL NOT
+fail for this reason; it SHALL return the result with `requires_drop_unmatched` true.
 
 #### Scenario: Moved occurrence keeps its time
 - **WHEN** a 09:00 daily series has an occurrence moved to 14:00 and is changed with
@@ -233,37 +254,61 @@ series and listed in the result's `unmatched`, never dropped without being liste
 - **THEN** that occurrence is still at 14:00 and has the new title, unless its own title had
   been changed, in which case it keeps that title
 
+#### Scenario: New notes reach overrides without their own
+- **WHEN** a series has two overrides without their own notes and one retitled override, and
+  is changed with `update_all` and new `notes`
+- **THEN** all three overrides have the new notes and the retitled one keeps its title
+
 #### Scenario: New time of day re-keys exceptions
 - **WHEN** a 09:00 daily series with a deleted occurrence on 2027-02-15 is changed to 10:00
   with `update_all`
 - **THEN** the master's `EXDATE` is 2027-02-15 at 10:00, no occurrence is returned on that day,
   and `unmatched` is empty
 
-#### Scenario: Exception that no longer fits
+#### Scenario: Deleted occurrence that no longer fits
 - **WHEN** a weekly `MO,WE` series with a changed Monday occurrence and a deleted Wednesday
   occurrence is changed with `update_all` to `weekdays: [MO]`
 - **THEN** the changed Monday occurrence is kept, the deleted Wednesday is listed in
   `unmatched` with `kind` `deleted` and its `original_start`, and `exceptions.unmatched` is 1
 
-#### Scenario: Unmatched changed occurrence
+#### Scenario: Changed occurrence that no longer fits
 - **WHEN** a changed occurrence's day has no occurrence in the new pattern in `update_from`
-- **THEN** it is not stored in either part of the series, and `unmatched` lists it with
-  `kind` `changed`, `original_start`, its current `start`, `end` and `title`
+  and `drop_unmatched` is not given
+- **THEN** the call fails with `1 changed occurrences no longer fit the new pattern; preview
+  to see them, or pass drop_unmatched: true to drop them` and no write request is sent
+
+#### Scenario: Previewing an unmatched changed occurrence
+- **WHEN** the same call is made with `preview: true`
+- **THEN** the result lists the occurrence in `unmatched` with `kind` `changed`,
+  `original_start`, its current `start`, `end` and `title`, and has
+  `requires_drop_unmatched` true
+
+#### Scenario: Dropping an unmatched changed occurrence
+- **WHEN** the same call is made with `drop_unmatched: true`
+- **THEN** the occurrence is stored in neither part of the series and is listed in
+  `unmatched`
 
 ### Requirement: Series edit from a date
-In the `_from` modes the series SHALL be stored as two series. The existing resource SHALL
-keep its `UID` and every occurrence and exception before `effective` as they were: its rule
-SHALL end with the last occurrence it generates before `effective` (an `UNTIL` at that start,
-in UTC for a zoned series or as a date for an all-day one, or a `COUNT` reduced to the number
-of occurrences generated before the date), its `EXDATE` values and overrides on or after
+In the `_from` modes the part of the series that contains `effective` SHALL be stored as two
+series, in Apple Calendar's format. The existing resource SHALL keep its `UID` and every
+occurrence and exception before `effective` as they were: its master's rule SHALL get an
+`UNTIL` of 23:59:59 local time, in the series' zone, on the day before `effective`, written
+in UTC for a zoned series (for example `20261103T055959Z` for an America/Chicago series and
+`effective` 2026-11-03), as a local time for a floating series and as the date of that day
+for an all-day series, replacing any `COUNT`; its `EXDATE` values and overrides on or after
 `effective` SHALL be removed, and every other component and property SHALL be kept as stored.
 The part from `effective` on SHALL be a new series in a new resource of the same calendar,
-whose name and `UID` are a new random UUID, with the new definition, the rule given (or the
-rest of the old one: its `UNTIL`, or its `COUNT` minus the occurrences generated before the
-date) and, in `update_from`, the kept exceptions re-keyed and given the new `UID`. The call
-SHALL fail with a tool error before any write when the series has no occurrence before
-`effective` (`no occurrence before <date>; use replace_all or update_all`) or none on or
-after it (`the series has no occurrence on or after <date>`).
+whose name and `UID` are a new random UUID, copying every property and alarm of the master
+(among them `LOCATION`, `X-APPLE-STRUCTURED-LOCATION` and `TRANSP`) with the new definition
+applied, with the rule given (or the rest of the old one: its `UNTIL`, or its `COUNT` minus
+the occurrences generated before the date) and, in `update_from`, the kept exceptions
+re-keyed and given the new `UID`. Both masters SHALL carry
+`RELATED-TO;RELTYPE=X-CALENDARSERVER-RECURRENCE-SET` with the same value: the old master's
+value when it has one, otherwise a new random UUID unrelated to either `UID`. The call SHALL
+fail with a tool error before any write when the series has no occurrence before `effective`
+(`no occurrence before <date>; use replace_all or update_all`) or none on or after it (`the
+series has no occurrence on or after <date>`). The result SHALL carry `ids_changed_from`, the
+effective date, and the tool description SHALL say that occurrence ids on or after it change.
 
 #### Scenario: Earlier occurrences untouched
 - **WHEN** a school-day series with a deleted occurrence and a moved occurrence before
@@ -280,28 +325,113 @@ after it (`the series has no occurrence on or after <date>`).
   is still absent, the moved occurrence after it keeps its time and gains the new location,
   and both are in the new resource with the new `UID`
 
+#### Scenario: Apple's cut
+- **WHEN** an America/Chicago weekly series is changed with `update_from` and `effective`
+  `2026-11-03`
+- **THEN** the old master's rule has `UNTIL=20261103T055959Z`, both masters carry the same
+  `RELATED-TO;RELTYPE=X-CALENDARSERVER-RECURRENCE-SET` value, which equals neither `UID`,
+  and the result's `ids_changed_from` is `2026-11-03`
+
+#### Scenario: Recurrence set value reused
+- **WHEN** the series' master already has a recurrence-set `RELATED-TO` and is split again
+- **THEN** the new master carries the same value and the old master's value is unchanged
+
 #### Scenario: Count split
 - **WHEN** a weekly series with `COUNT=10` is changed with `update_from` at its fifth
   occurrence without `recurrence`
-- **THEN** the old resource has `COUNT=4` and the new series has `COUNT=6`, and together
-  they return the same ten dates as before
+- **THEN** the old master's rule has an `UNTIL` on the day before and no `COUNT`, the new
+  series has `COUNT=6`, and together they return the same ten dates as before
 
 #### Scenario: Effective date at the first occurrence
 - **WHEN** `effective` is on or before the series' first occurrence
 - **THEN** the call fails with `no occurrence before <date>; use replace_all or update_all`
   and nothing is sent
 
+### Requirement: Series edit of a split series
+A series' recurrence set SHALL be every resource in the series' calendar whose master carries
+`RELATED-TO;RELTYPE=X-CALENDARSERVER-RECURRENCE-SET` with the same value as the series'
+master; a series without that property is a set of one part. The server SHALL find the other
+parts with read requests only (`REPORT`), SHALL re-read every part with a single-href
+`calendar-multiget` before any write, and SHALL refuse a set of more than 10 parts before any
+write with `this series has more than 10 parts; change it in Calendar`. On a set of more than
+one part:
+
+- `update_all` that changes only field edits SHALL apply them to every part, each part with
+  one `PUT` with `If-Match` of its own fresh read, the overrides of each part treated as in
+  "Series edit exceptions".
+- `replace_all`, and `update_all` that changes a pattern field, SHALL fail before any write
+  with `this series was split; change it from a date (replace_from / update_from)`.
+- The `_from` modes SHALL change the part that contains `effective` as in "Series edit from a
+  date", except that when `effective` is on or before the first occurrence of a part that is
+  not the set's first part, that part SHALL be changed in place with one `PUT` with
+  `If-Match` and no new resource. Every part that begins after it SHALL be treated like
+  `update_all`: field edits SHALL be applied to it with one `PUT` with `If-Match`; when there
+  is such a part, a pattern field or `replace_from` SHALL fail before any write with `this
+  series was split on <date>; change its pattern from that date or later`. Parts before the
+  one containing `effective` SHALL NOT be written.
+
+Parts SHALL be written in order of their first occurrence. When a part's write fails, the
+server SHALL send nothing more and fail with a tool error naming the parts already changed
+and the part that failed, by `uid` and first occurrence; earlier parts SHALL NOT be undone.
+
+#### Scenario: Title across a split series
+- **WHEN** a series split in Calendar into two parts of one recurrence set is changed with
+  `update_all` and a new `title`
+- **THEN** iCloud sees one `PUT` with `If-Match` per part, every occurrence of both parts
+  `calendar_events` returns has the new title, and the result's `parts` is `{total: 2,
+  changed: 2}`
+
+#### Scenario: Pattern change on a split series
+- **WHEN** the same series is changed with `update_all` and a new `start`
+- **THEN** the call fails with `this series was split; change it from a date (replace_from /
+  update_from)` and no write request is sent
+
+#### Scenario: Replace on a split series
+- **WHEN** the same series is changed with `replace_all`
+- **THEN** the call fails with the same error and no write request is sent
+
+#### Scenario: From a date with a later part
+- **WHEN** a set has parts starting 2027-01-04 and 2027-03-01 and is changed with
+  `update_from`, `effective` `2027-02-01` and a new `location`
+- **THEN** the first part is split at 2027-02-01 and the 2027-03-01 part gets the new
+  location with one `PUT` with `If-Match`
+
+#### Scenario: Pattern change from a date with a later part
+- **WHEN** the same set is changed with `update_from`, `effective` `2027-02-01` and a new
+  `recurrence`
+- **THEN** the call fails with `this series was split on 2027-03-01; change its pattern from
+  that date or later` and no write request is sent
+
+#### Scenario: From the start of a later part
+- **WHEN** the same set is changed with `update_from`, `effective` `2027-03-01` and a new
+  `recurrence`
+- **THEN** the 2027-03-01 part is changed in place with one `PUT` with `If-Match`, no new
+  resource is created, and the first part is not written
+
+#### Scenario: Later part fails
+- **WHEN** a two-part set is changed with `update_all` and a new title and the second part's
+  `PUT` is answered 412
+- **THEN** the call fails with an error naming the first part as changed and the second as
+  failed, and nothing more is sent
+
+#### Scenario: Too many parts
+- **WHEN** a recurrence set has 11 parts
+- **THEN** the call fails with `this series has more than 10 parts; change it in Calendar`
+  and no write request is sent
+
 ### Requirement: Series edit writes and rollback
-An `_all` mode SHALL send exactly one `PUT` with `If-Match` (the ETag of the fresh read) for
-the series' resource. A `_from` mode SHALL first send a `PUT` with `If-None-Match: *` for the
-new resource and then a `PUT` with `If-Match` (the ETag of the fresh read) for the series'
-resource. When the second `PUT` is answered with HTTP 412, 404 or another 4xx, the server
-SHALL read the new resource once (one single-href `calendar-multiget`) and send `DELETE` with
-`If-Match` of that ETag, and then fail with the second `PUT`'s error (for 412: `the event
-changed in Calendar; read it again`). When the second `PUT` gets no answer, is throttled, or
-the rollback fails, the server SHALL send nothing more and fail with a tool error saying the
-series may now be stored twice from the effective date and naming the new series' `id`. No
-request SHALL be retried, and a call SHALL send at most three write requests.
+An `_all` mode SHALL send one `PUT` with `If-Match` (the ETag of the fresh read) per part it
+changes. A `_from` mode that splits a part SHALL first send a `PUT` with `If-None-Match: *`
+for the new resource and then a `PUT` with `If-Match` (the ETag of the fresh read) for the
+part being cut. When that second `PUT` is answered with HTTP 412, 404 or another 4xx, the
+server SHALL read the new resource once (one single-href `calendar-multiget`) and send
+`DELETE` with `If-Match` of that ETag, and then fail with the second `PUT`'s error (for 412:
+`the event changed in Calendar; read it again`). When the second `PUT` gets no answer, is
+throttled, or the rollback fails, the server SHALL send nothing more and fail with a tool
+error saying the series may now be stored twice from the effective date and naming the new
+series' `id`. Later parts SHALL be written only after the split succeeded. No request SHALL
+be retried, and a call SHALL send at most one write request per part plus, for a split, one
+for the new resource and one rollback `DELETE`.
 
 #### Scenario: Series changed meanwhile
 - **WHEN** the series' resource changes in Calendar between the fresh read and the second
@@ -323,15 +453,17 @@ request SHALL be retried, and a call SHALL send at most three write requests.
 The result SHALL include `mode`, `preview`, and `id`, `uid`, `calendar`, `calendar_id`,
 `start`, `end`, `timezone`, `all_day` and `recurring` of the first occurrence of the changed
 part in the formats of `calendar_event` (readable by `calendar_event` at once unless it is a
-preview); `occurrences`, the number of occurrences that follow the new definition after its
-deleted ones are removed, counted to the series' last occurrence or, for an endless series,
-through 366 days after its first changed occurrence, with `occurrences_through` that last day
-counted (null when the series ends); `exceptions` with the counts `kept`, `discarded` and
-`unmatched`; `unmatched`, one entry per unmatched exception with `kind`, `original_start` and,
-for kind `changed`, `start`, `end` and `title`; and, in the `_from` modes, `previous` with the
-old series' `uid` and the start of its last occurrence. With `preview: true` the call SHALL
-read and check exactly as without it and return the same result, and SHALL send no write
-request.
+preview); `occurrences`, the number of occurrences that follow the new definition in every
+changed part after deleted ones are removed, counted to the last one or, for an endless
+series, through 366 days after the first changed occurrence, with `occurrences_through` that
+last day counted (null when the series ends); `exceptions` with the counts `kept`,
+`discarded` and `unmatched` over every changed part; `unmatched`, one entry per unmatched
+exception with `kind`, `original_start` and, for kind `changed`, `start`, `end` and `title`;
+`parts` with the recurrence set's `total` and the number of parts `changed`; with
+`preview: true`, `requires_drop_unmatched`; and, when a part was split, `previous` with the
+old series' `uid` and the start of its last occurrence, and `ids_changed_from`. With
+`preview: true` the call SHALL read and check exactly as without it and return the same
+result, and SHALL send no write request.
 
 #### Scenario: Counts reported
 - **WHEN** a series of 20 occurrences with three deleted occurrences after the date is
@@ -351,8 +483,9 @@ request.
 ### Requirement: Series edit input limits
 `calendar_series_update` SHALL refuse, with a tool error naming the field and before any
 CalDAV request, a `mode` other than the four values, a missing or non-ISO `effective` in the
-`_from` modes, an `effective` in the `_all` modes, and every input `calendar_event_update`
-and `calendar_event_create` refuse for the same fields.
+`_from` modes, an `effective` in the `_all` modes, a `drop_unmatched` or `preview` that is not
+a boolean, and every input `calendar_event_update` and `calendar_event_create` refuse for the
+same fields.
 
 #### Scenario: Unknown mode
 - **WHEN** a caller passes `mode` `this_and_following`
