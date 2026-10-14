@@ -130,27 +130,39 @@ class CardDavClient(DavClient):
 
     def multiget(self, book: str, hrefs: list[str]) -> list[tuple[str, str]]:
         """(href, vCard text) for each card that still exists."""
-        url = httpx.URL(book)
         out: list[tuple[str, str]] = []
         for i in range(0, len(hrefs), MULTIGET_BATCH):
             chunk = hrefs[i : i + MULTIGET_BATCH]
-            body = (
-                '<card:addressbook-multiget xmlns:d="DAV:" '
-                'xmlns:card="urn:ietf:params:xml:ns:carddav">'
-                "<d:prop><d:getetag/><card:address-data/></d:prop>"
-                + "".join(f"<d:href>{escape(h)}</d:href>" for h in chunk)
-                + "</card:addressbook-multiget>"
-            )
-            root, base = self._request("REPORT", url, body, "1")
-            out.extend(self._cards(root, base))
+            out.extend((href, data) for href, data, _ in self._multiget(book, chunk))
         return out
 
+    def cards(self, book: str, hrefs: list[str]) -> dict[str, tuple[str, str]]:
+        """href -> (stored vCard text, ETag) for each of a few cards that still exists, in one
+        request: the fresh read before a contact write (ADR-0006). Read-only, like the rest."""
+        if not hrefs:
+            return {}
+        if len(hrefs) > MULTIGET_BATCH:
+            raise ValueError("too many cards for one read")
+        return {href: (data, tag) for href, data, tag in self._multiget(book, hrefs) if tag}
+
+    def _multiget(self, book: str, hrefs: list[str]) -> list[tuple[str, str, str | None]]:
+        body = (
+            '<card:addressbook-multiget xmlns:d="DAV:" '
+            'xmlns:card="urn:ietf:params:xml:ns:carddav">'
+            "<d:prop><d:getetag/><card:address-data/></d:prop>"
+            + "".join(f"<d:href>{escape(h)}</d:href>" for h in hrefs)
+            + "</card:addressbook-multiget>"
+        )
+        root, base = self._request("REPORT", httpx.URL(book), body, "1")
+        return self._cards(root, base)
+
     @staticmethod
-    def _cards(root: ET.Element, base: httpx.URL) -> list[tuple[str, str]]:
-        out: list[tuple[str, str]] = []
+    def _cards(root: ET.Element, base: httpx.URL) -> list[tuple[str, str, str | None]]:
+        out: list[tuple[str, str, str | None]] = []
         for resp in root.findall("d:response", NS):
             href = text(resp.find("d:href", NS))
             data = resp.find("d:propstat/d:prop/card:address-data", NS)
+            tag = text(resp.find("d:propstat/d:prop/d:getetag", NS))
             if href and data is not None and data.text:
-                out.append((_path(base, href), data.text))
+                out.append((_path(base, href), data.text, tag))
         return out

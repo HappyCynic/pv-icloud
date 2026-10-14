@@ -35,7 +35,7 @@ Each group ends with its tests passing.
 
 ## 3. Fake CardDAV server
 
-- [ ] 3.1 Extend `tests/fakecarddav.py`: an ETag per card that changes on every change;
+- [x] 3.1 Extend `tests/fakecarddav.py`: an ETag per card that changes on every change;
   `getetag` in `addressbook-multiget` answers; `sync-collection` that reports cards written
   through `PUT` and removed through `DELETE`; `PUT` with `If-None-Match: *` (412 when the name
   exists) or `If-Match` (412 on mismatch) and `DELETE` with `If-Match`, rejecting either
@@ -54,10 +54,10 @@ Each group ends with its tests passing.
 
 ## 4. Read-side addition
 
-- [ ] 4.1 Write tests for the new read in `contacts/carddav.py`: one `addressbook-multiget`
+- [x] 4.1 Write tests for the new read in `contacts/carddav.py`: one `addressbook-multiget`
   for a few hrefs returns each card's stored text and ETag; a missing href is reported as
   missing; only `REPORT` is sent.
-- [ ] 4.2 Implement it in `src/pv_icloud/contacts/carddav.py`; verify 4.1 passes and the read
+- [x] 4.2 Implement it in `src/pv_icloud/contacts/carddav.py`; verify 4.1 passes and the read
   tools' results are unchanged.
 
 ## 5. vCard composition and lossless editing
@@ -158,7 +158,8 @@ Each group ends with its tests passing.
   row of the label table, plus an unlabelled, a custom-labelled and a preferred phone) and
   confirm Apple Contacts shows the same labels and that a card Apple Contacts writes with
   the same labels has the same `TYPE` parameters (design decision 3); update one field
-  on a card that has a photo and confirm the photo and every other field survive and `REV`
+  on a card that has a photo and confirm the photo and every other field survive, the
+  stored bytes differ only in the changed line and `REV` (line endings included), and `REV`
   is bumped; change a name part on a card with a custom display name and confirm it is kept;
   add the contact to and remove it from a test group; delete it and record whether iCloud
   leaves its member entry in the group card. Any difference from the fake is fixed in the

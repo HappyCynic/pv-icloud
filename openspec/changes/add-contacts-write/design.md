@@ -186,7 +186,11 @@ The stored text is split into logical lines, each keeping its original physical 
 2. rewrites only those lines (and, for a removed value, the other lines of its item group);
 3. emits every other line exactly as stored, in the stored order; new lines go just before
    `END:VCARD`;
-4. folds rewritten and new lines at 75 octets with CRLF and escapes values per vCard 3.0.
+4. folds rewritten and new lines at 75 octets and escapes values per vCard 3.0. They end
+   with the card's own line ending, CRLF as vCard requires; LF only if the stored card
+   uses LF, so a card never gets mixed endings. (An XML parser reads a literal CR LF inside
+   `address-data` as LF; Apple's server sends each CR as `&#13;`, which survives. The fake
+   does the same, and task 10.1 confirms the stored bytes, line endings included.)
 
 Per property:
 
