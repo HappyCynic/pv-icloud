@@ -122,7 +122,7 @@ Each group ends with its tests passing.
 
 ## 8. Tools, permissions and audit
 
-- [ ] 8.1 Write tests in `tests/test_server.py`: with the switch off,
+- [x] 8.1 Write tests in `tests/test_server.py`: with the switch off,
   `contacts.carddav_write` and `contacts.compose` are not imported and no contact write tool
   is registered; a token without `contacts_write` gets the same `tools/list`, annotations and
   instructions as before (snapshot); a token sees exactly the contact tools of its granted
@@ -137,7 +137,7 @@ Each group ends with its tests passing.
   untrusted-content warning, and that `REV` is updated and a custom display name is kept;
   audit lines have `write: true` and no id, name, number,
   address, email, note, label or group name, including for refused and part-way calls.
-- [ ] 8.2 Implement the three tools, conditional registration behind the switch, per-token
+- [x] 8.2 Implement the three tools, conditional registration behind the switch, per-token
   `tools/list` filtering and call-time checks by action, instructions, and contact-write
   audit redaction in `src/pv_icloud/server.py`; verify 8.1 passes.
 
