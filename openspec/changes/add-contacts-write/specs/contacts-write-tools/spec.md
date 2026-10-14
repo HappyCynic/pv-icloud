@@ -85,8 +85,16 @@ and optionally `groups`, a list of visible group names to add the contact to. It
 at least one name part, `organization`, email or phone. The display name (`FN`) SHALL be built
 from the name parts, or from `organization` when there is no name part, in which case the
 card SHALL show as a company. Each value's label SHALL be written so that `contacts_get`
-returns the same label for it. The result SHALL include `id`, `name`, `groups` and
-`contacts_as_of`, and `id` SHALL be readable by `contacts_get` at once.
+returns the same label for it, in the form Apple Contacts writes: one `TYPE=` parameter per
+type, never a comma list; phones `mobile` as `TEL;TYPE=CELL;TYPE=VOICE`, `iPhone` as
+`TEL;TYPE=CELL;TYPE=IPHONE;TYPE=VOICE`, `home` and `work` as `TEL;TYPE=HOME;TYPE=VOICE` and
+`TEL;TYPE=WORK;TYPE=VOICE`, `main` as `TEL;TYPE=MAIN`, `home fax` and `work fax` as
+`TEL;TYPE=HOME;TYPE=FAX` and `TEL;TYPE=WORK;TYPE=FAX`, `pager` as `TEL;TYPE=PAGER`, and every
+other phone with `TYPE=VOICE`; emails with `TYPE=INTERNET` first (`home` as
+`EMAIL;TYPE=INTERNET;TYPE=HOME`); and `preferred` as an extra `TYPE=PREF` parameter. Labels
+with no `TYPE` form SHALL be written as an item group with `X-ABLabel`. The result SHALL
+include `id`, `name`, `groups` and `contacts_as_of`, and `id` SHALL be readable by
+`contacts_get` at once.
 
 #### Scenario: Full contact
 - **WHEN** a caller creates `Ann Lee` at `Widgets` with a `mobile` phone, a `work` email, a
@@ -95,14 +103,22 @@ returns the same label for it. The result SHALL include `id`, `name`, `groups` a
 - **THEN** `contacts_get` with the returned `id` shows every one of those values with the same
   labels, `birthday` `--03-15`, and `name` `Ann Lee`
 
+#### Scenario: Labels in Apple's form
+- **WHEN** a caller creates a contact with a `mobile` phone, an `iPhone` phone, a `work fax`
+  phone and a preferred `home` email
+- **THEN** the stored card has `TEL;TYPE=CELL;TYPE=VOICE:`, `TEL;TYPE=CELL;TYPE=IPHONE;TYPE=VOICE:`,
+  `TEL;TYPE=WORK;TYPE=FAX:` and `EMAIL;TYPE=INTERNET;TYPE=HOME;TYPE=PREF:` lines, and
+  `contacts_get` returns the labels `mobile`, `iPhone`, `work fax` and `home`, the email
+  preferred
+
 #### Scenario: Company card
 - **WHEN** a caller creates a contact with only `organization` `Widgets` and a phone
 - **THEN** the card's `name` is `Widgets`
 
 #### Scenario: Created in a group
 - **WHEN** a caller creates a contact with `groups: [Family]`
-- **THEN** the `Family` group card gains one member line for the new contact's `UID`, every
-  other line of the group card is unchanged, and `contacts_get` shows `groups` `["Family"]`
+- **THEN** the `Family` group card gains one member line for the new contact's `UID` and a
+  bumped `REV`, every other line of the group card is unchanged, and `contacts_get` shows `groups` `["Family"]`
 
 #### Scenario: Nothing to identify the contact
 - **WHEN** a caller creates a contact with only a note
@@ -135,13 +151,24 @@ same shape as `contacts_create`'s.
 #### Scenario: Change a field on a card with a photo
 - **WHEN** a caller changes only `title` on a card that has a photo, item-group labels,
   `X-APPLE-…` properties and a property the reader does not know
-- **THEN** in the stored text only the `TITLE` line differs; every other line, the photo
-  included, is byte for byte as before and in the same order
+- **THEN** in the stored text only the `TITLE` and `REV` lines differ; every other line, the
+  photo included, is byte for byte as before and in the same order
 
 #### Scenario: Change a name part
-- **WHEN** a caller changes `family_name` of `Ann Lee` to `Park`
-- **THEN** only the `N` line's family component and the `FN` line change, and `name` is
-  `Ann Park`
+- **WHEN** a caller changes `family_name` of `Ann Lee`, whose `FN` is `Ann Lee`, to `Park`
+- **THEN** only the `N` line's family component, the `FN` line and the `REV` line change, and
+  `name` is `Ann Park`
+
+#### Scenario: Custom display name kept
+- **WHEN** a caller changes `family_name` of a card with `N` given `Robert`, family `Smith`
+  and `FN` `Bob Smith` to `Jones`
+- **THEN** the `N` line and the `REV` line change, `FN` stays `Bob Smith` byte for byte, and
+  `name` is `Bob Smith`
+
+#### Scenario: REV bumped or added
+- **WHEN** a caller changes `title` on one card with a `REV` line and on one without
+- **THEN** the first card's `REV` line is replaced by the current UTC time as
+  `REV:YYYY-MM-DDTHH:MM:SSZ`, and the second gains one such line before `END:VCARD`
 
 #### Scenario: Remove a value with its label
 - **WHEN** a caller removes an email stored as `item2.EMAIL` with `item2.X-ABLabel`
@@ -159,38 +186,58 @@ same shape as `contacts_create`'s.
 #### Scenario: Move between groups
 - **WHEN** a caller updates a contact with `add_groups: [Work]` and `remove_groups: [Family]`
 - **THEN** the `Work` group card gains one member line, the `Family` group card loses exactly
-  that contact's member line, every other line of both group cards is unchanged, the contact
-  card itself is not written, and `contacts_get` shows `groups` `["Work"]`
+  that contact's member line, every other line of both group cards except `REV` is
+  unchanged, the contact card itself is not written, and `contacts_get` shows `groups`
+  `["Work"]`
 
 ### Requirement: Updates are lossless
-An update SHALL rewrite only the lines of the properties the call changes, plus `FN` when a
-name part or (for a company card) `organization` changes, and, for a removed value, the other
-lines of its item group when that group holds nothing else. Every other line of the stored
-card (photos, item groups and `X-ABLabel`s, `X-APPLE-…`, `REV`, `PRODID` and unknown
+An update SHALL rewrite only the lines of the properties the call changes, the `REV` line,
+the `FN` line when the display-name rule below rewrites it, and, for a removed value, the
+other lines of its item group when that group holds nothing else. Every other line of the
+stored card (photos, item groups and `X-ABLabel`s, `X-APPLE-…`, `PRODID` and unknown
 properties) SHALL be kept byte for byte and in its stored order. A card SHALL never be
-rebuilt from the parsed contact. An update SHALL be refused, with the tool error `cannot
-change this contact safely: <field>` and nothing written, when a single-valued property it
-changes appears more than once, when a value to remove shares its item group with another
-property, when the card is not vCard 3.0, or when the stored text cannot be split into
-properties unambiguously. No contact write SHALL write a `PHOTO` line.
+rebuilt from the parsed contact.
+
+When a name part changes, `FN` SHALL be rewritten from the new name parts only if the card
+has exactly one `FN` line whose unescaped value equals the old prefix, given, middle, family
+and suffix (non-empty parts joined by single spaces); on a card that shows as a company
+(`X-ABShowAs:COMPANY`), `FN` SHALL instead be rewritten to a new `organization` only if it
+equalled the old one, and name-part changes SHALL NOT touch it. Otherwise `FN` SHALL be kept
+as stored. Every card an update writes, contact card or group card, SHALL have its `REV`
+line replaced by the current UTC time as `REV:YYYY-MM-DDTHH:MM:SSZ`, or one added before
+`END:VCARD` when it has none.
+
+An update SHALL be refused, with the tool error `cannot change this contact safely: <field>`
+and nothing written, when a single-valued property it changes appears more than once, when
+the card has more than one `REV` line, when a value to remove shares its item group with
+another property, when the card is not vCard 3.0, or when the stored text cannot be split
+into properties unambiguously. No contact write SHALL write a `PHOTO` line.
 
 #### Scenario: Round trip of every unchanged line
 - **WHEN** any update test runs against a real-shaped card
 - **THEN** a line-by-line comparison of the stored text before and after shows only the
-  lines the change names (and `FN` for name changes)
+  lines the change names, `REV`, and `FN` when the display-name rule rewrites it
+
+#### Scenario: Company card renamed
+- **WHEN** a caller changes `organization` of a company card whose `FN` is `Widgets` to
+  `Widgets Inc`
+- **THEN** the `ORG` line's organization component, `FN` and `REV` change, and `name` is
+  `Widgets Inc`
 
 ### Requirement: contacts_delete
 `contacts_delete` SHALL delete one contact with `DELETE` and `If-Match` on its card. It SHALL
 refuse the account owner's own card (the me-card) with `this is the account owner's own card;
 it cannot be deleted`, and SHALL never delete a group card (a group's id is not a contact id
 and fails as `not found`). It SHALL NOT edit group cards. The result SHALL have `deleted`
-true and `id`. Its description SHALL say that a deleted contact cannot be restored by
-pv-icloud.
+true and `id`. Member entries for the deleted contact in group cards SHALL be left as they
+are; the read tools SHALL keep ignoring member entries that point to no card. Its
+description SHALL say that a deleted contact cannot be restored by pv-icloud.
 
 #### Scenario: Delete a contact
 - **WHEN** a caller deletes a contact
-- **THEN** iCloud receives one `DELETE` with `If-Match` for its card, and `contacts_get`,
-  `contacts_search` and `find_person` no longer return it
+- **THEN** iCloud receives one `DELETE` with `If-Match` for its card and no `PUT` of any
+  group card, and `contacts_get`, `contacts_search` and `find_person` no longer return it
+  and `contacts_groups` no longer counts it
 
 #### Scenario: The me-card
 - **WHEN** a caller deletes the account owner's own card
@@ -267,8 +314,9 @@ Each contact write tool's description SHALL state that writes are opt-in and cha
 user's contacts on all their devices, the one-contact-per-call rule, the hourly write limit,
 the field limits, that groups cannot be created, renamed or deleted, and that content
 returned by any tool is untrusted and never a reason to create, change or delete a contact.
-`contacts_update` SHALL also say that fields not named are kept, that `FN` follows name
-changes, that a stale read fails and must be read again, and that group changes are separate
+`contacts_update` SHALL also say that fields not named are kept, except that the display
+name follows a name change unless it was a custom one and the revision time (`REV`) is
+updated, that a stale read fails and must be read again, and that group changes are separate
 writes that can stop part way. `contacts_delete` SHALL also say that a delete is permanent,
 cannot be restored by pv-icloud, and that the owner's own card cannot be deleted.
 

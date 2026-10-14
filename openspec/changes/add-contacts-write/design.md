@@ -141,22 +141,33 @@ Results: create and update return `id`, `name`, `groups` and `contacts_as_of`, i
 ### 3. Labels written so they read back the same
 
 `contacts_get` derives labels from Apple item-group labels (`X-ABLabel`) or `TYPE`s. New
-values are written the way Apple Contacts writes them, so that reading a new value back gives
-the label that was given:
+values are written exactly as Apple Contacts writes them, so that reading a new value back
+gives the label that was given and Apple's apps see the same card they would have written.
+Each type is its own `TYPE=` parameter, in the order below, never a comma list
+(`TEL;TYPE=CELL;TYPE=VOICE`, not `TEL;TYPE=CELL,VOICE` or `TEL;TYPE=CELL`):
 
 | Label given (case-insensitive) | Written as |
 | --- | --- |
-| `home`, `work` (emails, phones, addresses, URLs) | `TYPE=HOME` / `TYPE=WORK` |
-| `mobile` (phones) | `TYPE=CELL` |
-| `iPhone` (phones) | `TYPE=IPHONE,CELL` |
-| `main`, `pager` (phones) | `TYPE=MAIN` / `TYPE=PAGER` |
-| `home fax`, `work fax` (phones) | `TYPE=HOME,FAX` / `TYPE=WORK,FAX` |
+| `mobile` (phones) | `TEL;TYPE=CELL;TYPE=VOICE` |
+| `iPhone` (phones) | `TEL;TYPE=CELL;TYPE=IPHONE;TYPE=VOICE` |
+| `home`, `work` (phones) | `TEL;TYPE=HOME;TYPE=VOICE` / `TEL;TYPE=WORK;TYPE=VOICE` |
+| `main` (phones) | `TEL;TYPE=MAIN` |
+| `home fax`, `work fax` (phones) | `TEL;TYPE=HOME;TYPE=FAX` / `TEL;TYPE=WORK;TYPE=FAX` |
+| `pager` (phones) | `TEL;TYPE=PAGER` |
+| `home`, `work` (emails) | `EMAIL;TYPE=INTERNET;TYPE=HOME` / `EMAIL;TYPE=INTERNET;TYPE=WORK` |
+| `home`, `work` (addresses, URLs) | `ADR;TYPE=HOME`, `URL;TYPE=WORK`, … |
 | Apple's other built-in labels (`other`, `school`, `homepage`, `anniversary`, `mother`, `father`, `parent`, `brother`, `sister`, `child`, `friend`, `spouse`, `partner`, `assistant`, `manager`) | item group with `X-ABLabel:_$!<Other>!$_` style |
 | any other label | item group with `X-ABLabel:<label>` |
 | none | no label |
 
-Emails also get `TYPE=INTERNET`; `preferred: true` adds `pref`. Item group names are
-`item<N>` with `N` one more than the highest in the card. Dates are `X-ABDATE` and related
+Every email gets `TYPE=INTERNET` first (an unlabelled one is `EMAIL;TYPE=INTERNET`), and every
+phone outside the `main`, fax and `pager` rows gets `TYPE=VOICE` last, including unlabelled
+phones (`TEL;TYPE=VOICE`) and phones with an item-group label (`itemN.TEL;TYPE=VOICE`).
+`preferred: true` adds `TYPE=PREF` as one more parameter after the others, on emails and
+phones (`EMAIL;TYPE=INTERNET;TYPE=HOME;TYPE=PREF`). Parameter names and values are written in
+upper case. The fake CardDAV server's fixture cards use these exact forms, and a test pins
+both the written bytes of every row and the label `contacts_get` reads back. Item group names
+are `item<N>` with `N` one more than the highest in the card. Dates are `X-ABDATE` and related
 names `X-ABRELATEDNAMES` in item groups; a birthday without a year is written as Apple does,
 `BDAY;X-APPLE-OMIT-YEAR=1604:1604-MM-DD`. Social profiles are `X-SOCIALPROFILE;TYPE=<service>`
 with `X-USER=`, instant messaging `IMPP;X-SERVICE-TYPE=<service>:<scheme>:<handle>`. A test
@@ -179,18 +190,27 @@ Per property:
   department): only the component asked for is replaced; the line's parameters and the other
   components are kept as stored (escaped as stored). Clearing the last non-empty component of
   `ORG` removes the line.
-- **Display name (`FN`)** follows the name, as in Apple Contacts: when a name part changes,
-  `FN` is rewritten from prefix, given, middle, family and suffix; for a card that shows as a
-  company (`X-ABShowAs:COMPANY`), `FN` follows `organization` instead. This is the only
-  property rewritten that the call did not name, and the tool description says so.
+- **Display name (`FN`)** follows the name only when it was derived from it. The live
+  address book has `FN` equal to "prefix given middle family suffix" on 1,526 of 1,544
+  person cards; the other 18 carry a custom display name, which must survive. So when a name
+  part changes, `FN` is rewritten from the new prefix, given, middle, family and suffix only
+  if the card has exactly one `FN` line and its unescaped value equals what the *old* name
+  parts give (non-empty parts joined by single spaces, compared exactly). For a card that
+  shows as a company (`X-ABShowAs:COMPANY`), the same rule applies to `organization`: `FN` is
+  rewritten to the new organization only if it equalled the old one, and name-part changes
+  never touch it. In every other case `FN` is left as stored.
+- **Revision (`REV`)** is bumped, as Apple's apps do (1,561 of 1,580 live cards carry `REV`,
+  and other sync clients use it): every card an update writes, contact card or group card,
+  gets its `REV` line replaced by the current UTC time as `REV:YYYY-MM-DDTHH:MM:SSZ`, or one
+  added before `END:VCARD` when it has none. A card with more than one `REV` line is refused.
+  `FN` and `REV` are the only properties written that the call did not name, and the tool
+  description says so.
 - **Single-valued properties** (`NICKNAME`, `X-MAIDENNAME`, `TITLE`, `NOTE`, `BDAY`): the one
   line is replaced or removed, or added when missing.
 - **List values:** a removed value's line is deleted together with the other lines of its
   item group (`X-ABLabel`, `X-ABADR`, …) when the group holds nothing else; added values are
   new lines (decision 3).
-- **Unknown, photo, `X-APPLE-…`, `REV`, `PRODID` and every other line** are never touched.
-  `REV` is not bumped: iCloud and Apple's apps sync on ETags, and leaving it is the smaller
-  change.
+- **Unknown, photo, `X-APPLE-…`, `PRODID` and every other line** are never touched.
 
 The change is **refused** (`cannot change this contact safely: <field>`) with nothing written
 when: a single-valued property the call changes appears more than once; a value to remove
@@ -200,8 +220,8 @@ example, a property line without a colon). The parsed `Card` model is used only 
 values and check matches, never to write.
 
 Tests pin a round trip on real-shaped cards (photo, item groups, Apple labels, folded
-parameters, unknown `X-` properties): only the lines a change names (and `FN` for name
-changes) differ, byte for byte.
+parameters, unknown `X-` properties, a custom display name): only the lines a change names,
+`REV`, and `FN` when the rule above rewrites it, differ, byte for byte.
 
 New cards are vCard 3.0 with `PRODID:-//pv-icloud//EN`, `N`, `FN`, `UID`, `REV`, the given
 fields in a fixed order, and `X-ABShowAs:COMPANY` when the card has an organization and no
@@ -213,8 +233,8 @@ and `UID` are one new random UUID (`<UUID>.vcf`).
 Membership is stored in the group card, so `add_groups`, `remove_groups` and create's `groups`
 edit group cards, losslessly, with the same rules: adding appends one
 `X-ADDRESSBOOKSERVER-MEMBER:urn:uuid:<contact UID>` line before `END:VCARD`; removing deletes
-exactly the lines whose value is that member. Every other line of the group card, including
-members hidden from this token, is kept byte for byte. A group card is never renamed or
+exactly the lines whose value is that member; `REV` is bumped (decision 4). Every other line
+of the group card, including members hidden from this token, is kept byte for byte. A group card is never renamed or
 deleted, and its other properties are never changed.
 
 A group named in `groups`, `add_groups` or `remove_groups` must be a visible group of the
@@ -297,8 +317,9 @@ Errors:
   change; read the contact again before retrying`.
 
 Deleting a contact does not edit group cards: a member entry for a deleted UID is ignored by
-the reader and is not counted by `contacts_groups`. Whether iCloud cleans it up itself is
-checked live (task 10.1).
+the reader and is not counted by `contacts_groups`. Apple's own clients leave such entries
+too: 23 of the 4,515 member entries in the live address book already point to no card.
+Task 10.1 records whether iCloud cleans them up itself; either way pv-icloud leaves them.
 
 ### 8. Refreshing the address book after a write
 
@@ -374,8 +395,11 @@ note, label or group name appears.
 - [An update could silently drop data the reader does not show] → In-place text edits only,
   never a rebuild; refuse anything ambiguous; byte-for-byte round-trip tests on real-shaped
   cards; `If-Match` from a fresh read.
-- [`FN` changes when a name part changes, though the call did not name it] → Matches Apple
-  Contacts, keeps the display name consistent, and is stated in the description.
+- [`FN` and `REV` change though the call did not name them] → `FN` changes only when it was
+  derived from the old name, so custom display names survive; `REV` is bumped as Apple's apps
+  do, so REV-based sync clients see the change. Both are stated in the description.
+- [A custom display name that happens to equal the old name parts is rewritten] → Such a
+  name is indistinguishable from a derived one, and it is what Apple Contacts shows anyway.
 - [A call with group changes is not atomic] → Everything is validated before the first
   write; the error says exactly what was saved; nothing is retried; group cards are edited
   losslessly so a partial result never damages them.
@@ -391,18 +415,31 @@ None: the new switch and key default to off or empty, so existing configs behave
 before. Operators opt in with `PV_ICLOUD_CONTACTS_WRITE=enabled` and `contacts_write` on a
 token. Rollback is unsetting the switch, removing the key and restarting.
 
+## Resolved Questions
+
+Answered by the maintainer on #25 (2026-10-14), with a read-only check of a live address book
+(counts and property shapes only):
+
+1. **Per-action grants** instead of #25's single switch: confirmed; ADR-0006 wins
+   (decision 1).
+2. **Member entries of deleted contacts are left** in group cards (decision 7); Apple's
+   clients leave them too.
+3. **`FN` is rewritten only when it was derived from the old name** (or, for company cards,
+   the old organization); custom display names are kept (decision 4).
+4. **`REV` is bumped** on every card an update writes (decision 4).
+5. **A grant on an account with `contacts.enabled: false` is a config error** (decision 1).
+6. **Labels are written in Apple's exact forms**, separate `TYPE=` parameters with
+   `TYPE=VOICE` on phones and `TYPE=INTERNET` on emails, pinned in the fake and the label
+   tests (decision 3).
+
 ## Open Questions
 
-1. **Per-action grants instead of #25's single switch.** Proposed per ADR-0006 and CLAUDE.md
-   (decision 1). Confirm.
-2. **Deleting a contact leaves its member entries in group cards** (decision 7). Proposed:
-   leave them (invisible to every tool) unless the live check shows iCloud keeps them and
-   Apple Contacts misbehaves; cleaning them up would add group writes to a delete.
-3. **`FN` follows name changes** (decision 4). Alternative: never touch `FN`, so a changed
-   family name leaves the old display name. Proposed: follow, as Apple Contacts does.
-4. **`REV` is not bumped on update** (decision 4). Proposed: leave it; the live check confirms
-   Apple's apps pick up the change.
-5. **A grant on an account with `contacts.enabled: false` is a config error** (decision 1).
-   Alternative: allow it and let the tools fail with the existing "turned off" error.
+1. **Group cards get a `REV` bump too** (decisions 4 and 5). The answer to question 4 says
+   "on every update"; this design reads that as every card an update writes, so a
+   membership change bumps the group card's `REV` (the contact card is not written). The
+   alternative is to bump only contact cards.
+2. **`TYPE=VOICE` on unlabelled and item-group-labelled phones, and `TYPE=PREF` on preferred
+   phones** (decision 3) extend the stated forms by analogy. Task 10.1 checks them against
+   what Apple Contacts writes.
 
 The maintainer live-tests on a test contact before merge (task 10.1).

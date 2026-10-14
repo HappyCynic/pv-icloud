@@ -33,9 +33,12 @@ iCloud; CLAUDE.md, `openspec/config.yaml` and `.github/CODEOWNERS` already carry
     existing groups.
   - `contacts_update`: change, add or remove individual fields of one contact, and add it to
     or remove it from existing groups. **Lossless:** the stored vCard text is edited in place;
-    only the properties the call changes are rewritten, and every other line (photo, item
-    groups with `X-ABLabel`, `X-APPLE-…` and unknown properties, their order) is kept byte
-    for byte. A change that cannot be applied unambiguously is refused with nothing written.
+    only the properties the call changes are rewritten, plus `REV` (bumped, as Apple's apps
+    do) and `FN` when it was derived from the old name (custom display names are kept); every
+    other line (photo, item groups with `X-ABLabel`, `X-APPLE-…` and unknown properties,
+    their order) is kept byte for byte. A change that cannot be applied unambiguously is
+    refused with nothing written. New values are written in Apple Contacts' exact label
+    forms (`TEL;TYPE=CELL;TYPE=VOICE`, `EMAIL;TYPE=INTERNET;TYPE=HOME`, …).
   - `contacts_delete`: delete one contact, permanently. Never the account owner's own card
     (the me-card) or a group card.
 - **Groups:** membership lives in the group's vCard (`X-ADDRESSBOOKSERVER-MEMBER`), so adding
@@ -68,8 +71,8 @@ iCloud; CLAUDE.md, `openspec/config.yaml` and `.github/CODEOWNERS` already carry
 Out of scope (from #25 and ADR-0006): creating, renaming or deleting groups; merging
 duplicate contacts; editing photos; deleting the me-card; contacts in excluded groups; batch
 writes. Also not in this change: switching a card between showing as a person and as a
-company, and cleaning up group membership entries of deleted contacts (see design, open
-questions).
+company, and cleaning up group membership entries of deleted contacts (Apple's own clients
+leave them too; see design, resolved questions).
 
 ## Capabilities
 

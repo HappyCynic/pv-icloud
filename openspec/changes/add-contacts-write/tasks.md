@@ -42,8 +42,11 @@ Each group ends with its tests passing.
   without a precondition; storing `PUT` bodies byte for byte; a hook to change a card between
   a read and a write; 503 with `Retry-After` on demand for writes; real-shaped fixture cards
   (photo, item groups with Apple and custom `X-ABLabel`s, folded parameters,
-  `X-APPLE-OMIT-YEAR`, `X-ABShowAs:COMPANY`, unknown `X-` properties, a card with two `NOTE`
-  lines, a vCard 4.0 card) and group cards with members hidden by an excluded group. Writes to
+  `X-APPLE-OMIT-YEAR`, `X-ABShowAs:COMPANY`, unknown `X-` properties, a custom display name
+  that differs from the name parts, a card with `REV` and one without, a card with two `NOTE`
+  lines, a card with two `REV` lines, a vCard 4.0 card), with phones and emails in Apple's
+  exact label forms from design decision 3 (separate `TYPE=` parameters, `TYPE=VOICE` on
+  phones, `TYPE=INTERNET` on emails, `TYPE=PREF`), and group cards with members hidden by an excluded group. Writes to
   the address book collection, the home, a non-`.vcf` or nested path, any CalDAV URL, a
   `DELETE` of a group card or the me-card, and any other method are recorded as forbidden
   write attempts. Verify the existing contacts and `find_person` tests still pass.
@@ -62,9 +65,16 @@ Each group ends with its tests passing.
   `src/pv_icloud/contacts/compose.py`: new cards (vCard 3.0, `PRODID`, `N`, `FN`, `UID`,
   `REV`, `X-ABShowAs:COMPANY` for an organization-only card, CRLF, folding at 75 octets,
   escaping of `,`, `;`, `\` and line breaks); for every row of the label table in design
-  decision 3, `parse_vcard` of the written value returns the given label; birthdays and dates
-  with and without a year; in-place edits of each scalar field (only that line, and `FN` for
-  name parts or a company card's organization, differs byte for byte); `N` and `ORG`
+  decision 3, the written line's bytes are exactly the form in the table (separate `TYPE=`
+  parameters in that order, `TYPE=VOICE` and `TYPE=INTERNET` where listed, `TYPE=PREF` for
+  preferred) and `parse_vcard` of it returns the given label; birthdays and dates with and
+  without a year; in-place edits of each scalar field (only that line and `REV` differ byte
+  for byte); `FN` rewritten on a name-part change only when it equalled the old name parts,
+  and kept byte for byte when it is a custom display name or there is more than one `FN`
+  line; a company card's `FN` following `organization` only when it equalled the old one,
+  and untouched by name-part changes; `REV` replaced with the current UTC time
+  (`YYYY-MM-DDTHH:MM:SSZ`, using an injected clock), added when missing, and the change
+  refused for two `REV` lines; group card edits bump `REV` too; `N` and `ORG`
   component edits keeping parameters and other components as stored; `clear`; `add` and
   `remove` of every list field, removing a value's whole item group and nothing else; new
   item group numbers; `remove` matching on every shown field, refused with the field named
@@ -93,9 +103,10 @@ Each group ends with its tests passing.
 - [ ] 7.1 Write tests in a new `tests/test_contacts_write.py`: create with every field and
   labels, readable at once by `contacts_get`, `contacts_search` and `find_person`; create in a
   group; update of one field keeps every other line byte for byte (photo included); fixing a
-  phone with `remove` plus `add`; name change rewrites `N` and `FN` only; group add and
-  remove edit only the group cards' member lines and do not write the contact card; delete
-  removes the contact from every read tool; every update and delete re-reads the cards and
+  phone with `remove` plus `add`; name change rewrites `N`, `FN` and `REV` only, and keeps a
+  custom display name; group add and remove edit only the group cards' member and `REV`
+  lines and do not write the contact card; delete removes the contact from every read tool
+  and `contacts_groups` counts, writes no group card, and leaves its member entries in place; every update and delete re-reads the cards and
   sends those ETags (a stale ETag from an earlier call is never used); 412 on the contact
   leaves the other version and sends one `PUT` only; 412 on the second of two group cards
   reports what was saved, retries nothing, and the cache reflects what was written; contact
@@ -122,7 +133,8 @@ Each group ends with its tests passing.
   tokens match the spec; descriptions state the limits, opt-in, one contact per call, that
   fields not named are kept and `FN` follows the name, that groups cannot be created,
   renamed or deleted, the me-card rule, that delete cannot be undone, and the
-  untrusted-content warning; audit lines have `write: true` and no id, name, number,
+  untrusted-content warning, and that `REV` is updated and a custom display name is kept;
+  audit lines have `write: true` and no id, name, number,
   address, email, note, label or group name, including for refused and part-way calls.
 - [ ] 8.2 Implement the three tools, conditional registration behind the switch, per-token
   `tools/list` filtering and call-time checks by action, instructions, and contact-write
@@ -142,9 +154,11 @@ Each group ends with its tests passing.
 ## 10. Live check (maintainer, before merge)
 
 - [ ] 10.1 With a test token on a test contact: create a contact with labelled values (one per
-  row of the label table) and confirm Apple Contacts shows the same labels; update one field
-  on a card that has a photo and confirm the photo and every other field survive; add the
-  contact to and remove it from a test group; delete it and check whether iCloud leaves a
-  member entry in the group card (design open question 2); confirm Apple's apps pick up
-  changes without a `REV` bump. Any difference from the fake is fixed in the fake as well as
-  the server.
+  row of the label table, plus an unlabelled, a custom-labelled and a preferred phone) and
+  confirm Apple Contacts shows the same labels and that a card Apple Contacts writes with
+  the same labels has the same `TYPE` parameters (design open question 2); update one field
+  on a card that has a photo and confirm the photo and every other field survive and `REV`
+  is bumped; change a name part on a card with a custom display name and confirm it is kept;
+  add the contact to and remove it from a test group; delete it and record whether iCloud
+  leaves its member entry in the group card. Any difference from the fake is fixed in the
+  fake as well as the server.
