@@ -120,6 +120,97 @@ class TestFake:
             (monday(0), "Standup"), (monday(2, 11), "Standup moved"), (monday(3), "Standup"),
         ]  # fmt: skip
 
+    @staticmethod
+    def listing(start: dt.datetime, end: dt.datetime | None = None, filters: str = "") -> str:
+        s = start.astimezone(dt.UTC).strftime("%Y%m%dT%H%M%SZ")
+        e = f' end="{end.astimezone(dt.UTC):%Y%m%dT%H%M%SZ}"' if end else ""
+        return (
+            '<c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">'
+            "<d:prop><d:getetag/><c:calendar-data/></d:prop>"
+            '<c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="VEVENT">'
+            f'<c:time-range start="{s}"{e}/>{filters}'
+            "</c:comp-filter></c:comp-filter></c:filter></c:calendar-query>"
+        )
+
+    def test_unexpanded_open_ended_listing(self, fake, http):
+        cal = fake.accounts["alice@icloud.com"].calendars[0]
+        series = resource(weekly("s", count=10))  # through week 9
+        cal.resources.append(series)
+        lo = dt.datetime.combine(NEXT_MONDAY + dt.timedelta(weeks=5), dt.time(), CHI)
+        resp = http.request("REPORT", self.URL, content=self.listing(lo), headers={"depth": "1"})
+        # The series has occurrences after `lo`; the single event of week 0 has none.
+        assert resp.status_code == 207 and "RRULE:FREQ=WEEKLY;COUNT=10" in resp.text
+        assert "SUMMARY:A" not in resp.text and etag(series).strip('"') in resp.text
+        late = lo + dt.timedelta(weeks=10)
+        resp = http.request("REPORT", self.URL, content=self.listing(late), headers={"depth": "1"})
+        assert "BEGIN:VCALENDAR" not in resp.text
+        first = dt.datetime.combine(NEXT_MONDAY, dt.time(), CHI)
+        bounded = self.listing(first, first + dt.timedelta(days=1))
+        resp = http.request("REPORT", self.URL, content=bounded, headers={"depth": "1"})
+        assert "SUMMARY:A" in resp.text and "COUNT=10" in resp.text
+        assert [k for m, _, k in fake.calls if m == "REPORT"] == ["listing"] * 3
+
+    @pytest.mark.parametrize(
+        ("filters", "status"),
+        [
+            ('<c:prop-filter name="SUMMARY"><c:text-match>A</c:text-match></c:prop-filter>', 207),
+            (
+                '<c:prop-filter name="SUMMARY"><c:text-match collation="i;octet">A'
+                "</c:text-match></c:prop-filter>",
+                412,
+            ),
+            (
+                '<c:prop-filter name="RELATED-TO"><c:param-filter name="RELTYPE">'
+                "<c:text-match>X</c:text-match></c:param-filter></c:prop-filter>",
+                500,
+            ),
+        ],
+    )
+    def test_unsupported_filters_answer_as_icloud_does(self, http, filters, status):
+        first = dt.datetime.combine(NEXT_MONDAY, dt.time(), CHI)
+        body = self.listing(first, first + dt.timedelta(days=1), filters)
+        resp = http.request("REPORT", self.URL, content=body, headers={"depth": "1"})
+        assert resp.status_code == status
+        assert "SUMMARY:A" not in resp.text  # a prop-filter matches nothing, not even SUMMARY
+
+    def test_put_fail_hook_and_call_record(self, fake, http):
+        cal = fake.accounts["alice@icloud.com"].calendars[0]
+        ct = {"content-type": "text/calendar"}
+        body = resource(vevent("b", "B", monday(1)))
+        fake.put_fail["b.ics"] = 503
+        put = http.put(self.URL + "b.ics", content=body, headers={**ct, "if-none-match": "*"})
+        assert put.status_code == 503 and cal.get("b.ics") is None
+        fake.put_fail["b.ics"] = None  # stored, but the answer is lost
+        with pytest.raises(httpx.ReadTimeout):
+            http.put(self.URL + "b.ics", content=body, headers={**ct, "if-none-match": "*"})
+        assert cal.get("b.ics") == body and fake.put_fail == {}
+        http.delete(self.URL + "b.ics", headers={"if-match": etag(body)})
+        assert fake.calls == [
+            ("PUT", "/111/calendars/home/b.ics", "If-None-Match"),
+            ("PUT", "/111/calendars/home/b.ics", "If-None-Match"),
+            ("DELETE", "/111/calendars/home/b.ics", "If-Match"),
+        ]
+
+    def test_expands_count_and_until(self):
+        from .fakecaldav import _expanded
+
+        lo = dt.datetime.combine(NEXT_MONDAY, dt.time(), CHI).astimezone(dt.UTC)
+        hi = lo + dt.timedelta(weeks=20)
+        until = dt.datetime.combine(NEXT_MONDAY + dt.timedelta(weeks=2), dt.time(23, 59, 59), CHI)
+        timed = vevent(
+            "u", "U", monday(0), monday(0, 10),
+            extra=(f"RRULE:FREQ=WEEKLY;UNTIL={until.astimezone(dt.UTC):%Y%m%dT%H%M%SZ}",),
+        )  # fmt: skip
+        last_day = NEXT_MONDAY + dt.timedelta(weeks=3)
+        all_day = vevent(
+            "d", "D", NEXT_MONDAY, NEXT_MONDAY + dt.timedelta(days=1),
+            extra=(f"RRULE:FREQ=WEEKLY;UNTIL={last_day:%Y%m%d}",),
+        )  # fmt: skip
+        for res, n in ((timed, 3), (all_day, 4), (weekly("c", count=5), 5)):
+            out = _expanded(resource(res), lo, hi, "America/Chicago")
+            assert out is not None
+            assert len(icalendar.Calendar.from_ical(out).walk("VEVENT")) == n
+
     def test_own_address_stored_as_principal_path_and_scheduling_recorded(self, fake, http):
         cal = fake.accounts["alice@icloud.com"].calendars[0]
         ct = {"content-type": "text/calendar"}

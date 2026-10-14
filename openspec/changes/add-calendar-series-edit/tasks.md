@@ -14,7 +14,7 @@ ADR-0007 (design decision 11). Each group ends with its tests passing.
 
 ## 2. Fake CalDAV server
 
-- [ ] 2.1 Extend `tests/fakecaldav.py` where needed: `<C:expand>` honours `COUNT` and `UNTIL`
+- [x] 2.1 Extend `tests/fakecaldav.py` where needed: `<C:expand>` honours `COUNT` and `UNTIL`
   (UTC for zoned series, local for floating, dates for all-day), re-keyed overrides and
   `STATUS:CANCELLED` overrides; an unexpanded `calendar-query` with a `time-range` that may
   have no end (a recurring resource matches when any occurrence falls in it), returning
