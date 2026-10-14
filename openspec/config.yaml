@@ -52,6 +52,9 @@ context: |
       cal/caldav_write.py, conditional PUT/DELETE of one event in a calendar with
       write-content (own or shared read-write), never attendees and never events with
       external attendees (iCloud ignores SCHEDULE-AGENT=CLIENT and would email them).
+      Series edits (calendar_series_update, docs/adr/0007-calendar-series-edit.md): at most
+      10 parts per call, splits stored as Apple does, a DELETE only of the call's own new
+      resource, no prop-filter, param-filter or collation in calendar-query.
     - Contacts (PV_ICLOUD_CONTACTS_WRITE=enabled, docs/adr/0006-opt-in-contact-write.md):
       contacts/carddav_write.py, conditional PUT/DELETE of one vCard, lossless in-place
       updates, never the me-card, groups or excluded-group members.

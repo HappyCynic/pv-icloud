@@ -111,6 +111,26 @@ def test_calendar_write_rule_is_kept_and_documented() -> None:
     assert (ROOT / "docs" / "adr" / "0005-opt-in-calendar-write.md").exists()
 
 
+def test_series_edit_rule_is_kept_and_documented() -> None:
+    text = " ".join(_claude_md().split())  # independent of line wrapping
+    for phrase in (
+        "`calendar_series_update`",
+        "at most 10 parts of one series per call",
+        "may `DELETE` only the resource that same call created",
+        "never drops a changed occurrence without `drop_unmatched: true`",
+        "never sends `prop-filter`, `param-filter` or a `collation`",
+        "docs/adr/0007-calendar-series-edit.md",
+    ):
+        assert phrase in text, phrase
+    config = (ROOT / "openspec" / "config.yaml").read_text()
+    assert "0007-calendar-series-edit" in config
+    security = (ROOT / "SECURITY.md").read_text()
+    assert "0007-calendar-series-edit" in security
+    adr_0005 = (ROOT / "docs" / "adr" / "0005-opt-in-calendar-write.md").read_text()
+    assert "0007-calendar-series-edit.md" in adr_0005
+    assert (ROOT / "docs" / "adr" / "0007-calendar-series-edit.md").exists()
+
+
 def test_contact_write_rule_is_kept_and_documented() -> None:
     text = " ".join(_claude_md().split())  # independent of line wrapping
     for phrase in (
