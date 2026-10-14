@@ -361,7 +361,7 @@ class TestLists:
             "ADR;TYPE=WORK:;;;Chicago;;;",
             "URL:https://x.example",
             "X-SOCIALPROFILE;TYPE=twitter;X-USER=ann:https://x.com/ann",
-            "IMPP;X-SERVICE-TYPE=Jabber:x-apple:ann@jabber.example",
+            "IMPP;X-SERVICE-TYPE=Jabber:xmpp:ann@jabber.example",
             "item7.X-ABDATE;X-APPLE-OMIT-YEAR=1604:1604-06-01",
             "item7.X-ABLabel:Graduation",
             "item8.X-ABRELATEDNAMES:Cy Lee",
@@ -594,3 +594,29 @@ def test_the_parsed_model_is_never_used_to_write():
     )
     after = update(text, values={"nickname": "A"})
     assert diff(text, after) == ([], ["NICKNAME:A", REV])
+
+
+@pytest.mark.parametrize(
+    ("service", "scheme"),
+    [
+        ("Skype", "skype"),
+        ("skype", "skype"),
+        ("Facebook", "xmpp"),
+        ("Jabber", "xmpp"),
+        ("GoogleTalk", "xmpp"),
+        ("AIM", "aim"),
+        ("ICQ", "aim"),
+        ("MSN", "msnim"),
+        ("Yahoo", "ymsgr"),
+        ("Teams", "x-apple"),
+        ("QQ", "x-apple"),
+    ],
+)
+def test_impp_scheme_as_apple_writes_it(service, scheme):
+    text = compose.new_card(
+        "U1",
+        {"given_name": "Ann", "instant_messaging": [{"service": service, "handle": "ann"}]},
+        NOW,
+    )
+    assert f"IMPP;X-SERVICE-TYPE={service}:{scheme}:ann\r\n" in text
+    assert parse_vcard(text).instant_messaging == [{"service": service, "handle": "ann"}]

@@ -102,6 +102,11 @@ _APPLE_LABELS = {
         "Sister", "Child", "Friend", "Spouse", "Partner", "Assistant", "Manager",
     )
 }  # fmt: skip
+# IMPP URI scheme per service, as Apple Contacts writes it; any other service gets `x-apple:`.
+_IMPP_SCHEMES = {
+    "aim": "aim", "icq": "aim", "jabber": "xmpp", "facebook": "xmpp", "googletalk": "xmpp",
+    "google talk": "xmpp", "msn": "msnim", "yahoo": "ymsgr", "skype": "skype",
+}  # fmt: skip
 _LABEL_META = frozenset({"X-ABLABEL", "X-ABADR"})  # lines that only describe an item group
 _ITEM = re.compile(r"^item(\d+)$", re.IGNORECASE)
 _FULL_DATE = re.compile(r"^(\d{4})-(\d{2})-(\d{2})$")
@@ -357,8 +362,9 @@ def _entry_lines(name: str, entry: Mapping[str, Any], next_item: list[int]) -> l
             params.append(f"X-USER={_param(entry['user'].strip())}")
         value = (entry.get("url") or "").strip()
     elif name == "instant_messaging":
-        params = [f"X-SERVICE-TYPE={_param(entry['service'].strip())}"]
-        value = "x-apple:" + entry["handle"].strip()
+        service = entry["service"].strip()
+        params = [f"X-SERVICE-TYPE={_param(service)}"]
+        value = _IMPP_SCHEMES.get(service.casefold(), "x-apple") + ":" + entry["handle"].strip()
     elif name == "dates":
         date_params, value = _date_value(entry["value"])
         params += date_params
