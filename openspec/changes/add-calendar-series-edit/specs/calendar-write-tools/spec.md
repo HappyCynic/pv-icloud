@@ -319,12 +319,12 @@ value when it has one, otherwise a new random UUID unrelated to either `UID`; th
 overrides in the new resource SHALL carry it too, and the old resource's remaining overrides
 SHALL be kept as stored. The call SHALL fail with a tool error before any write when the
 series has no occurrence on or after `effective` (`the series has no occurrence on or after
-<date>`). When `effective` is on or before the first occurrence of the first part found from
-it, nothing is split: a part whose master carries a recurrence-set value SHALL be changed in
-place (see "Series edit of a split series"), and a series without one SHALL fail with `no
-occurrence before <date>; use replace_all or update_all`. The result SHALL carry
-`ids_changed_from`, the effective date, and the tool description SHALL say that occurrence
-ids on or after it change.
+<date>`). When `effective` is on or before the first occurrence of the part that would be
+cut (the first part found from it), nothing SHALL be split: that part SHALL be changed in
+place with one `PUT` with `If-Match` and no new resource, whether or not its master carries a
+recurrence-set value, and the result's `parts.split` SHALL be false. After a split the
+result SHALL carry `ids_changed_from`, the effective date, and the tool description SHALL
+say that occurrence ids on or after it change.
 
 #### Scenario: Earlier occurrences untouched
 - **WHEN** a school-day series with a deleted occurrence and a moved occurrence before
@@ -365,9 +365,10 @@ ids on or after it change.
 
 #### Scenario: Effective date at the first occurrence
 - **WHEN** `effective` is on or before the first occurrence of a series without a
-  recurrence-set `RELATED-TO`
-- **THEN** the call fails with `no occurrence before <date>; use replace_all or update_all`
-  and nothing is sent
+  recurrence-set `RELATED-TO` and the call is `update_from` with a new title
+- **THEN** the series' resource is changed in place with one `PUT` with `If-Match`, no new
+  resource is created, every occurrence has the new title, and the result's `parts.split` is
+  false and has no `ids_changed_from`
 
 ### Requirement: Series edit of a split series
 A series' recurrence set SHALL be every resource in the series' calendar whose master carries
@@ -512,7 +513,7 @@ last day counted (null when the series ends); `exceptions` with the counts `kept
 `discarded` and `unmatched` over every changed part; `unmatched`, one entry per unmatched
 exception with `kind`, `original_start` and, for kind `changed`, `start`, `end` and `title`;
 `parts` with the number of parts `found` (1 without a recurrence set), the number `changed`,
-and `searched_from`, the start of the earlier-parts window (366 days before the current date)
+`split` (whether a part was split into two resources), and `searched_from`, the start of the earlier-parts window (366 days before the current date)
 in the `_all` modes for a series with a recurrence set, otherwise null; with
 `preview: true`, `requires_drop_unmatched`; and, when a part was split, `previous` with the
 old series' `uid` and the start of its last occurrence, and `ids_changed_from`. With

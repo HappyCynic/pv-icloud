@@ -195,11 +195,10 @@ of the series that contains the date, in Apple's format (Context):
   are left as stored.
 - `effective` must have at least one original occurrence on or after it in the set;
   otherwise the call fails (`the series has no occurrence on or after <date>`). When
-  `effective` is on or before the first occurrence of the part found first from it
-  (decision 6), there is nothing to cut: a part that carries a recurrence-set value is
-  changed in place, as a later part of a set (decision 7, confirmed by the maintainer); a
-  series without one fails with `no occurrence before <date>; use replace_all or
-  update_all`.
+  `effective` is on or before the first occurrence of the part that would be cut (the part
+  found first from it, decision 6), there is nothing to cut: that part is changed in place,
+  with or without a recurrence-set value, and the result says that no split was needed
+  (`parts.split: false`; maintainer's answer on #26).
 - **Occurrence ids from the date change**: an id names the calendar, the resource and the
   start, and the occurrences on or after the date now live in the new resource. The description says so and the result
   carries `ids_changed_from` (decision 8).
@@ -295,8 +294,7 @@ limits (from the maintainer's answer on #26):
   part are refused before any write: `this series was split; change it from a date
   (replace_from / update_from)`.
 - **`_from` modes** change the part that contains `effective` as in decision 4 (split it, or
-  change it in place when `effective` is on or before its first occurrence and it carries a
-  recurrence-set value), and treat every later part like `update_all`: field edits are
+  change it in place when `effective` is on or before its first occurrence), and treat every later part like `update_all`: field edits are
   applied to it, each with its own `PUT` and `If-Match`. When there are later parts, a
   pattern field is refused (`this series was split on <date>; change its pattern from that
   date or later`), and so is `replace_from` (confirmed by the maintainer), because a later
@@ -326,7 +324,7 @@ split's rollback.
   "unmatched": [{"kind": "changed", "original_start": "...", "start": "...", "end": "...",
                  "title": "..."}, {"kind": "deleted", "original_start": "..."}],
   "requires_drop_unmatched": false,    # preview only
-  "parts": {"found": 2, "changed": 2, "searched_from": "2025-10-14"},
+  "parts": {"found": 2, "changed": 2, "split": true, "searched_from": "2025-10-14"},
   "previous": {"uid": "...", "last_start": "..."},                      # split only
   "ids_changed_from": "2027-01-11"                                       # split only
 }
@@ -340,7 +338,9 @@ changed occurrence, in which case `occurrences_through` is that last day counted
 `exceptions` counts over every changed part. `unmatched` is not capped: its length is bounded
 by the exceptions stored in at most 10 resources, and its count is also in
 `exceptions.unmatched`. `parts` gives how many parts of the set were found (1 for a series
-without a recurrence set), how many the call changes, and `searched_from`: in the `_all`
+without a recurrence set), how many the call changes, `split` (whether a part was split
+into two resources; false in the `_all` modes and when a `_from` mode changed a part in
+place), and `searched_from`: in the `_all`
 modes for a series with a recurrence set, the start of the earlier-parts window (decision 6;
 parts that ended before it were not looked for), even when that listing was skipped;
 otherwise null (in the `_from` modes nothing before `effective` is looked for).
@@ -466,17 +466,8 @@ Answered on #26 (2026-10-14): ADR-0007 and the split are accepted; Apple's split
 including all-day `UNTIL` and the recurrence set on overrides; preview counts against the
 write limit; unmatched changed occurrences need `drop_unmatched`; the override propagation
 rule; recurrence sets, the 10-part cap, `replace_from` refused with later parts, a later part
-changed in place; finding parts by time-range listings without property filters.
-Remaining:
-
-1. **Earlier-parts listing for `replace_all`.** The maintainer's answer runs the year-back
-   listing for `update_all` only. `replace_all` must be refused on a split series, which
-   needs the earlier parts when the id names a later part, so this design runs it in both
-   `_all` modes (decision 6). The alternative is to refuse `replace_all` whenever the master
-   carries a recurrence-set value, without listing; that also refuses the rare series whose
-   other parts were all deleted.
-2. **`effective` before a set's first part.** Since the `_from` modes never look before
-   `effective`, a part that carries a recurrence-set value and starts on or after `effective`
-   is changed in place even when it is the set's first part (decision 4). This gives the same
-   outcome as the `_all` mode on that part and those after it; only a series without a
-   recurrence set fails with `no occurrence before <date>`.
+changed in place; finding parts by time-range listings without property filters; the
+year-back listing in both `_all` modes (real calendars hold recurrence sets with a single
+remaining part, which refusing `replace_all` on any recurrence-set value would block); and
+`effective` on or before the first occurrence of the part that would be cut changing that
+part in place, with or without a recurrence-set value (`parts.split: false`). None remain.

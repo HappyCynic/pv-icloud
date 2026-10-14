@@ -5,7 +5,7 @@ ADR-0007 (design decision 11). Each group ends with its tests passing.
 
 ## 1. Prerequisite
 
-- [ ] 1.1 Confirm that `docs/adr/0007-*.md` exists on the default branch and decides what
+- [x] 1.1 Confirm that `docs/adr/0007-*.md` exists on the default branch and decides what
   design decision 11 lists (series edits, the Apple-format split and its rollback `DELETE`,
   recurrence sets of up to 10 parts found by time-range listings without property filters);
   if it does not, or decides differently, stop and comment on the pull request instead of
@@ -54,8 +54,9 @@ ADR-0007 (design decision 11). Each group ends with its tests passing.
   the old rule or the new one, kept exceptions with the new `UID`); the recurrence-set
   `RELATED-TO` generated (unrelated to either `UID`) or reused, on both masters and on every
   override created or re-keyed (set to the master's value, removed when the master has
-  none), with the cut part's remaining overrides left as stored; and the "no occurrence
-  before / on or after" errors (the first only for a series without a recurrence set).
+  none), with the cut part's remaining overrides left as stored; the "no occurrence on or
+  after" error; and `effective` on or before the first occurrence changing the part in place
+  (`parts.split` false), with or without a recurrence set.
 - [ ] 3.4 Write failing tests for recurrence sets: picking parts out of a listing by their
   masters' `RELATED-TO` value and `RELTYPE` (other events, overrides and other values
   ignored), ordering by first occurrence, the 10-part cap, field edits applied per part,
