@@ -221,15 +221,26 @@ class TestConfig:
 WRITE_ON = {"PV_ICLOUD_MAIL_WRITE": "enabled"}
 
 
-def write_config(tmp_path, *, env=WRITE_ON, token=None, mail=None, defaults=None, tokens=None):
+def write_config(
+    tmp_path,
+    *,
+    env=WRITE_ON,
+    token=None,
+    mail=None,
+    defaults=None,
+    tokens=None,
+    calendar=None,
+    calendar_defaults=None,
+):
     """One account `x` with token `agent` (plus `token` keys) for the write-config tests."""
     raw = {
-        "defaults": {"mail": defaults or {}},
+        "defaults": {"mail": defaults or {}, "calendar": calendar_defaults or {}},
         "accounts": [
             {
                 "id": "x",
                 "tokens": tokens or [{"label": "agent", "sha256": "0" * 64, **(token or {})}],
                 "mail": mail or {},
+                "calendar": calendar or {},
             }
         ],
     }
@@ -500,6 +511,128 @@ class TestSendConfig:
         assert send_warnings(write_config(tmp_path, token={"mail_write": ["draft"]})) == []
 
 
+CAL_ON = {"PV_ICLOUD_CALENDAR_WRITE": "enabled"}
+
+
+class TestCalendarWriteSwitch:
+    """`PV_ICLOUD_CALENDAR_WRITE` (add-calendar-write, ADR-0005)."""
+
+    @pytest.mark.parametrize("value", [None, "", "disabled"])
+    def test_off_values(self, tmp_path, value):
+        env = {} if value is None else {"PV_ICLOUD_CALENDAR_WRITE": value}
+        assert write_config(tmp_path, env=env).calendar_write is False
+
+    def test_enabled(self, tmp_path):
+        assert write_config(tmp_path, env=CAL_ON).calendar_write is True
+
+    @pytest.mark.parametrize("value", ["true", "Enabled", "1", "yes"])
+    def test_other_values_are_an_error(self, tmp_path, value):
+        with pytest.raises(ConfigError, match="PV_ICLOUD_CALENDAR_WRITE must be `enabled` or"):
+            write_config(tmp_path, env={"PV_ICLOUD_CALENDAR_WRITE": value})
+
+    def test_grant_without_the_switch(self, tmp_path):
+        with pytest.raises(ConfigError) as err:
+            write_config(tmp_path, env=WRITE_ON, token={"calendar_write": True})
+        for part in ("account x", "'agent'", "calendar_write", "PV_ICLOUD_CALENDAR_WRITE"):
+            assert part in str(err.value)
+
+    def test_switches_are_independent(self, tmp_path):
+        cfg = write_config(tmp_path, env=WRITE_ON, token={"mail_write": ["draft"]})
+        assert (cfg.mail_write, cfg.calendar_write) == (True, False)
+        cfg = write_config(tmp_path, env=CAL_ON, token={"calendar_write": True})
+        assert (cfg.mail_write, cfg.calendar_write) == (False, True)
+        with pytest.raises(ConfigError, match="PV_ICLOUD_MAIL_WRITE"):
+            write_config(tmp_path, env=CAL_ON, token={"mail_write": ["draft"]})
+
+    def test_false_grant_needs_no_switch(self, tmp_path):
+        [tok] = write_config(tmp_path, env={}, token={"calendar_write": False}).account("x").tokens
+        assert tok.calendar_write is False
+
+
+class TestCalendarWriteConfig:
+    def test_token_defaults(self, tmp_path):
+        [tok] = write_config(tmp_path, env={}).account("x").tokens
+        assert (tok.calendar_write, tok.protected_calendars) == (False, ())
+
+    def test_token_keys(self, tmp_path):
+        token = {"calendar_write": True, "protected_calendars": ["Work", "Family"]}
+        [tok] = write_config(tmp_path, env=CAL_ON, token=token).account("x").tokens
+        assert tok.calendar_write is True and tok.mail_write == frozenset()
+        assert tok.protected_calendars == ("Work", "Family")
+
+    @pytest.mark.parametrize(
+        ("token", "parts"),
+        [
+            ({"calendar_write": ["create"]}, ["calendar_write", "true or false"]),
+            ({"calendar_write": "yes"}, ["calendar_write"]),
+            ({"calendar_write": 1}, ["calendar_write"]),
+            ({"protected_calendars": "Work"}, ["protected_calendars", "list"]),
+            ({"protected_calendars": [1]}, ["protected_calendars"]),
+            ({"protected_calendars": [""]}, ["protected_calendars"]),
+        ],
+    )
+    def test_token_keys_validated(self, tmp_path, token, parts):
+        with pytest.raises(ConfigError) as err:
+            write_config(tmp_path, env=CAL_ON, token=token)
+        for part in ["account x", "'agent'", *parts]:
+            assert part in str(err.value)
+
+    def test_protected_calendars_add_up_and_keep_their_case(self, tmp_path):
+        cfg = write_config(
+            tmp_path,
+            env={},
+            calendar_defaults={"write": {"protected_calendars": ["Family"]}},
+            calendar={"write": {"protected_calendars": ["work", "Family"]}},
+        )
+        acct = cfg.account("x")
+        assert acct.calendar.write.protected_calendars == ("Family", "work")
+        # The read settings are merged as before.
+        assert acct.calendar.calendars.allows("Family")
+
+    def test_defaults_alone_apply(self, tmp_path):
+        cfg = write_config(
+            tmp_path, env={}, calendar_defaults={"write": {"protected_calendars": ["Family"]}}
+        )
+        assert cfg.account("x").calendar.write.protected_calendars == ("Family",)
+        assert write_config(tmp_path, env={}).account("x").calendar.write.protected_calendars == ()
+
+    @pytest.mark.parametrize(
+        ("write", "parts"),
+        [
+            ({"protected": ["Work"]}, ["calendar.write", "unknown key", "protected"]),
+            ({"protected_calendars": "Work"}, ["calendar.write.protected_calendars", "list"]),
+            ({"protected_calendars": [3]}, ["calendar.write.protected_calendars"]),
+            (["Work"], ["calendar.write", "mapping"]),
+        ],
+    )
+    def test_account_settings_validated(self, tmp_path, write, parts):
+        with pytest.raises(ConfigError) as err:
+            write_config(tmp_path, env={}, calendar={"write": write})
+        for part in ["account x", *parts]:
+            assert part in str(err.value)
+
+    def test_defaults_settings_validated(self, tmp_path):
+        with pytest.raises(ConfigError, match="defaults.calendar.write: unknown key"):
+            write_config(tmp_path, env={}, calendar_defaults={"write": {"protect": ["Work"]}})
+
+    def test_tokens_of_one_account_resolve_to_their_own_calendar_permissions(self, tmp_path):
+        tokens = [
+            {
+                "label": "laptop",
+                "sha256": sha("laptop"),
+                "calendar_write": True,
+                "protected_calendars": ["Work"],
+            },
+            {"label": "phone", "sha256": sha("phone")},
+        ]
+        table = TokenTable(write_config(tmp_path, env=CAL_ON, tokens=tokens))
+        laptop, phone = table.resolve("laptop"), table.resolve("phone")
+        assert laptop is not None and phone is not None
+        assert (laptop.calendar_write, laptop.protected_calendars) == (True, ("Work",))
+        assert (phone.calendar_write, phone.protected_calendars) == (False, ())
+        assert laptop.mail_write == frozenset()
+
+
 class TestWriteLimiter:
     @pytest.fixture
     def clock(self):
@@ -586,6 +719,10 @@ def test_example_config_is_valid(tmp_path):
     assert all(not t.mail_write for a in cfg.accounts for t in a.tokens)
     on = parse_config(raw, {**env, "PV_ICLOUD_MAIL_WRITE": "enabled"}, tmp_path)
     assert on.accounts[0].mail.write.archive_folder == "Archive"
+    assert cfg.calendar_write is False
+    assert all(not t.calendar_write for a in cfg.accounts for t in a.tokens)
+    on = parse_config(raw, {**env, "PV_ICLOUD_CALENDAR_WRITE": "enabled"}, tmp_path)
+    assert on.calendar_write and on.accounts[0].calendar.write.protected_calendars == ()
 
 
 def test_per_account_limits_in_descriptions():

@@ -5,7 +5,7 @@ approved the proposal. Each group ends with its tests passing.
 
 ## 1. Policy tests
 
-- [ ] 1.1 Write failing tests in `tests/test_repo_policy.py`: `"PUT"` and `"DELETE"` are used
+- [x] 1.1 Write failing tests in `tests/test_repo_policy.py`: `"PUT"` and `"DELETE"` are used
   as HTTP methods (arguments to httpx `request`/`put`/`delete` calls and method constants)
   only in `src/pv_icloud/cal/caldav_write.py`; `dav.READ_METHODS` is exactly `PROPFIND` and
   `REPORT`; no source uses `MKCALENDAR`, `MKCOL`, `PROPPATCH`, `MOVE`, `COPY`, `ACL`, `LOCK`
@@ -16,25 +16,25 @@ approved the proposal. Each group ends with its tests passing.
 
 ## 2. Deployment switch, configuration and auth
 
-- [ ] 2.1 Write tests in `tests/test_units.py` for `PV_ICLOUD_CALENDAR_WRITE`: unset, empty
+- [x] 2.1 Write tests in `tests/test_units.py` for `PV_ICLOUD_CALENDAR_WRITE`: unset, empty
   and `disabled` are off; `enabled` is on; other values are a config error naming the
   variable; `calendar_write: true` while off is a config error naming account, label,
   `calendar_write` and the variable; the mail and calendar switches are independent.
-- [ ] 2.2 Write tests for the token keys `calendar_write` (default `false`; `true` loads;
+- [x] 2.2 Write tests for the token keys `calendar_write` (default `false`; `true` loads;
   lists, strings and numbers rejected with account, label and key) and
   `protected_calendars` (default empty; a list of strings loads; a string or non-string
   items rejected).
-- [ ] 2.3 Write tests for `calendar.write.protected_calendars` in the defaults and per
+- [x] 2.3 Write tests for `calendar.write.protected_calendars` in the defaults and per
   account: the lists add up, an account list never replaces the defaults, names are kept
   exactly, a wrong type or an unknown key under `calendar.write` is an error naming the
   account and key, and it loads with the switch off.
-- [ ] 2.4 Implement in `src/pv_icloud/config.py` (`TokenEntry.calendar_write`,
+- [x] 2.4 Implement in `src/pv_icloud/config.py` (`TokenEntry.calendar_write`,
   `TokenEntry.protected_calendars`, the account's calendar write settings,
   `Config.calendar_write`, the switch) and verify 2.1–2.3 pass.
-- [ ] 2.5 Write a test that two tokens of one account resolve to `AccountContext`s with their
+- [x] 2.5 Write a test that two tokens of one account resolve to `AccountContext`s with their
   own `calendar_write` and `protected_calendars`; extend `src/pv_icloud/auth.py` and verify it
   passes.
-- [ ] 2.6 Document the switch, `calendar_write` (off), `protected_calendars` and
+- [x] 2.6 Document the switch, `calendar_write` (off), `protected_calendars` and
   `calendar.write.protected_calendars` in `config/pv-icloud.example.yaml` and verify the
   example still loads in the config tests.
 
