@@ -116,9 +116,9 @@ include `id`, `name`, `groups` and `contacts_as_of`, and `id` SHALL be readable 
 #### Scenario: Unlabelled, item-group and preferred values
 - **WHEN** a caller creates a contact with an unlabelled preferred phone, a phone labelled
   `Boat` and a preferred email labelled `school`
-- **THEN** the stored card has a `TEL;TYPE=PREF:` line, `item1.TEL:` with
-  `item1.X-ABLabel:Boat`, and `item2.EMAIL;TYPE=INTERNET;TYPE=PREF:` with
-  `item2.X-ABLabel:_$!<School>!$_`
+- **THEN** the stored card has a `TEL;TYPE=PREF:` line, `item1.EMAIL;TYPE=INTERNET;TYPE=PREF:`
+  with `item1.X-ABLabel:_$!<School>!$_` (emails are written before phones), and `item2.TEL:`
+  with `item2.X-ABLabel:Boat`
 
 #### Scenario: Company card
 - **WHEN** a caller creates a contact with only `organization` `Widgets` and a phone

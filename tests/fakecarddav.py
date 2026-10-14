@@ -233,7 +233,7 @@ class FakeCardDav:
         # Runs once, just before the next write is handled (e.g. an edit in Contacts).
         self.before_write: Callable[[], None] | None = None
         self.write_fail: tuple[int, str | None] | None = None  # (status, Retry-After)
-        self.fail_reads = False  # answer REPORTs with 503 (a refresh after a write fails)
+        self.fail_reads = False  # answer REPORTs with 500 (a refresh after a write fails)
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -262,7 +262,7 @@ class FakeCardDav:
         if request.method in ("PUT", "DELETE"):
             return self._write(request, book, home, body)
         if self.fail_reads and request.method == "REPORT":
-            return httpx.Response(503)
+            return httpx.Response(500)
         if url.host == "contacts.icloud.com" and url.path == "/":
             return _multistatus(
                 [

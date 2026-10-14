@@ -101,7 +101,7 @@ Each group ends with its tests passing.
 
 ## 7. Create, update and delete in the contacts service
 
-- [ ] 7.1 Write tests in a new `tests/test_contacts_write.py`: create with every field and
+- [x] 7.1 Write tests in a new `tests/test_contacts_write.py`: create with every field and
   labels, readable at once by `contacts_get`, `contacts_search` and `find_person`; create in a
   group; update of one field keeps every other line byte for byte (photo included); fixing a
   phone with `remove` plus `add`; name change rewrites `N`, `FN` and `REV` only, and keeps a
@@ -117,7 +117,7 @@ Each group ends with its tests passing.
   deleted; nothing to change is refused; the cache refreshes right after a write even within
   the 60-second interval, and when that refresh fails the written change is applied to the
   in-memory copy and marked stale; no forbidden write attempt is recorded in any test.
-- [ ] 7.2 Implement create, update and delete in `src/pv_icloud/contacts/service.py`; verify
+- [x] 7.2 Implement create, update and delete in `src/pv_icloud/contacts/service.py`; verify
   7.1 passes.
 
 ## 8. Tools, permissions and audit
