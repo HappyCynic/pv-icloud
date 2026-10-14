@@ -179,7 +179,7 @@ pv-icloud.
 Every `PUT` and `DELETE` SHALL carry `If-None-Match: *` (new resource) or `If-Match`; a
 request without one SHALL be refused before it is sent. Before every update and delete the
 server SHALL re-read that one event resource from iCloud, stored data and ETag, without
-expansion, and SHALL send `If-Match` with exactly that ETag; an ETag SHALL never be reused
+expansion, with one `calendar-multiget` `REPORT` naming only that resource, and SHALL send `If-Match` with exactly that ETag; an ETag SHALL never be reused
 from an earlier call. The occurrence named by the id SHALL be found in the data just read
 (expanding the series locally when needed); when the resource or the occurrence is not there
 the call SHALL fail with a tool error mentioning `not found` and send no write. When iCloud

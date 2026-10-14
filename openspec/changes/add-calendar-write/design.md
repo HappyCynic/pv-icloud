@@ -167,10 +167,14 @@ Update and delete run, for one id:
 
 1. Resolve the calendar from the id against the caller's writable calendars (decision 7;
    `unknown calendar` otherwise).
-2. Re-read the stored event resource and its ETag with one `calendar-query` `REPORT`, Depth
-   0, on that resource's URL, asking for `getetag` and `calendar-data` **without**
-   `<C:expand>`, so the master, its `RRULE`/`EXDATE` and every override come back as stored.
-   (Read method only; added to `cal/caldav.py`.) No answer for the resource → `not found`.
+2. Re-read the stored event resource and its ETag with one `calendar-multiget` `REPORT` on
+   the calendar collection naming that one href, asking for `getetag` and `calendar-data`
+   **without** `<C:expand>`, so the master, its `RRULE`/`EXDATE` and every override come back
+   as stored. (Read method only; added to `cal/caldav.py`.) No data for the href (iCloud
+   answers 404 for it inside the multistatus) → `not found`. The maintainer's live check
+   (2026-10-14) found that iCloud answers a Depth 0 `calendar-query` on a resource URL with
+   403, while a single-href `calendar-multiget` returns 207 with the stored resource (master
+   and overrides) and the same ETag as the listing.
 3. Find the occurrence named by the id in that data, expanding the master locally with
    `cal/expand.py` when the id names an occurrence without an override (`not found` if it is
    not an occurrence of the series, for example after an `EXDATE`).
@@ -340,13 +344,13 @@ restarting.
 
 The maintainer answered the first proposal's questions on #24; they are folded in above
 (no attendees; refuse events with attendees or another organiser; one shared write budget;
-tool names kept; ADR-0005; `protected_calendars`). Remaining:
+tool names kept; ADR-0005; `protected_calendars`). The second round was answered on
+2026-10-14 and is folded in too:
 
-1. Is a `calendar-query` with Depth 0 on the event resource URL answered by iCloud with the
-   stored, unexpanded data and its ETag? If iCloud rejects it, the fallback is
-   `calendar-multiget` of that one href (iCloud already returns the stored master for it,
-   per `cal/caldav.py`). Both are read-only `REPORT`s; the implementation will pick the one
-   the live check confirms.
-2. Should an all-day or timed event created without `timezone` use the account's configured
-   `calendar.timezone` when set, else the iCloud calendar's zone? Proposed: yes, the same
-   default the read tools use.
+1. The fresh read is a single-href `calendar-multiget` (decision 5): iCloud refuses a Depth 0
+   `calendar-query` on a resource URL with 403.
+2. An event created without `timezone` uses the account's `calendar.timezone` when set, else
+   the iCloud calendar's zone, the same default the read tools use.
+
+None remain open. Recurring creation and single-occurrence edits and deletes are live-tested
+by the maintainer before merge (task 10.1).

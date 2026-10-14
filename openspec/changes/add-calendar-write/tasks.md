@@ -41,8 +41,10 @@ approved the proposal. Each group ends with its tests passing.
 ## 3. Fake CalDAV server
 
 - [ ] 3.1 Extend `tests/fakecaldav.py`: an ETag per event resource that changes on every
-  change; a Depth 0 `calendar-query` on one resource without `<C:expand>` returning the
-  stored data and `getetag`; `PUT` with `If-None-Match: *` (412 when the name exists) or
+  change; a single-href `calendar-multiget` on the calendar returning the stored data and
+  `getetag` (a Depth 0 `calendar-query` on a resource URL answered 403, as on iCloud);
+  `calendar-query` with `<C:expand>` expanding stored `RRULE` masters, `EXDATE`s and
+  overrides into instances; `PUT` with `If-None-Match: *` (412 when the name exists) or
   `If-Match` (412 on mismatch) and `DELETE` with `If-Match`, rejecting either without a
   precondition; a hook to change an event between a read and a write (as an attendee reply
   would); `current-user-privilege-set` per calendar (own and shared read-write with
@@ -150,6 +152,6 @@ approved the proposal. Each group ends with its tests passing.
 
 - [ ] 10.1 On the pv-icloud test calendar, with a test token: create a recurring event;
   edit one occurrence (a `RECURRENCE-ID` override) and delete another (`EXDATE`); confirm in
-  Calendar that the other occurrences are unchanged and that iCloud accepts the Depth 0
-  `calendar-query` on one resource (design open question 1). Any difference from the fake is
-  fixed in the fake as well as the server.
+  Calendar that the other occurrences are unchanged, and that the single-href
+  `calendar-multiget` re-read (design decision 5) is what precedes each write. Any difference
+  from the fake is fixed in the fake as well as the server.
