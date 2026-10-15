@@ -1,7 +1,7 @@
 [project]
 name = "pv-icloud"
-version = "0.2.0"
-description = "Private iCloud MCP: an MCP server for iCloud Mail, Calendar and Contacts (multi-account), read-only by default with opt-in mail actions"
+version = "0.3.0"
+description = "Private iCloud MCP: an MCP server for iCloud Mail, Calendar and Contacts (multi-account), read-only by default with opt-in mail, calendar and contact writes"
 requires-python = ">=3.14"
 readme = "README.md"
 license = "Apache-2.0"

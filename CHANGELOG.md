@@ -7,6 +7,8 @@ each version.
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-15
+
 ### Added
 
 - Opt-in calendar writes ([ADR-0005](docs/adr/0005-opt-in-calendar-write.md)), off by
@@ -73,9 +75,15 @@ each version.
 - Calendar tools now show the account's own address as the organiser's or an attendee's
   `email`. iCloud stores it as the account's principal path with the address in an `EMAIL=`
   parameter, which was shown as `email: null`; `calendar_search` finds it too.
+
+### Security
+
 - The log no longer has httpx's `HTTP Request:` lines at the default `INFO` level. They named
   every request URL, including subscribed calendar feed URLs, which often hold a private
   token, and the path of each event or card written. httpx warnings are still logged.
+  Versions 0.1.0 and 0.2.0 logged these lines: if an account fetches subscribed calendars
+  (`calendar.subscriptions: true`), delete or rotate the server logs those versions wrote,
+  and where a feed's URL holds a private token, have the publisher issue a new one.
 
 ## [0.2.0] - 2026-10-13
 
@@ -165,6 +173,7 @@ each version.
   and build provenance; Compose template; host firewall guide for outbound traffic
   (`docs/egress.md`).
 
-[Unreleased]: https://github.com/HappyCynic/pv-icloud/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/HappyCynic/pv-icloud/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/HappyCynic/pv-icloud/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/HappyCynic/pv-icloud/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/HappyCynic/pv-icloud/releases/tag/v0.1.0
