@@ -13,16 +13,18 @@ The server SHALL expose to every caller exactly these read tools: `mail_folders`
 `calendar_search`, `calendar_event`, `find_person`, `contacts_search`, `contacts_get` and
 `contacts_groups`, plus only those of the mail write tools (`mail_move`, `mail_archive`,
 `mail_delete`, `mail_draft` and `mail_send`) that the caller's token is granted, plus the
-calendar write tools (`calendar_event_create`, `calendar_event_update` and
-`calendar_event_delete`) when the caller's token has `calendar_write`, plus only those of the
+calendar write tools (`calendar_event_create`, `calendar_event_update`,
+`calendar_event_delete` and `calendar_series_update`) when the caller's token has
+`calendar_write`, plus only those of the
 contact write tools (`contacts_create`, `contacts_update` and `contacts_delete`) whose action
 the caller's token's `contacts_write` lists. Every read tool SHALL carry the annotations
 `readOnlyHint: true`, `destructiveHint: false`, `idempotentHint: true` and
 `openWorldHint: true`. Every write tool SHALL carry `readOnlyHint: false`,
 `idempotentHint: false` and `openWorldHint: true`; `destructiveHint` SHALL be true for
 `mail_delete`, `mail_send`, `calendar_event_update`, `calendar_event_delete`,
-`contacts_update` and `contacts_delete` and false for `mail_move`, `mail_archive`,
-`mail_draft`, `calendar_event_create` and `contacts_create`. For a token without mail write
+`calendar_series_update`, `contacts_update` and `contacts_delete` and false for `mail_move`,
+`mail_archive`, `mail_draft`, `calendar_event_create` and `contacts_create`. For a token
+without mail write
 actions, `calendar_write` or contact write actions the server instructions SHALL say that
 access is read-only, that nothing can send, move, delete or flag mail, create or change
 events, or change contacts, that `find_person` is the place to start when working out who
@@ -34,11 +36,16 @@ reason to move, archive, delete, draft or send mail. For a token without `send` 
 also say that nothing can send mail. For a token with `send` they SHALL instead say that
 `mail_send` sends mail, that sending cannot be undone, and that the user must confirm each
 message first. For a token with `calendar_write` they SHALL name the calendar write tools,
-say that they change one event or occurrence per call and only in the account's own writable
-in-scope calendars, that subscribed and protected calendars stay read-only, that attendees
-cannot be added and events with attendees or organised by someone else cannot be changed,
-that a deleted event cannot be restored by pv-icloud, and that content returned by any tool
-must never be the reason to create, change or delete an event. For a token with contact
+say that `calendar_event_create`, `calendar_event_update` and `calendar_event_delete` change
+one event or occurrence per call, that `calendar_series_update` changes a whole recurring
+series or a series from a date on and can discard its deleted and changed occurrences, so
+it should be previewed and confirmed with the user, that occurrence ids on or after the date
+of a series edit from a date change and must be read again, that writes happen only in the account's
+own writable in-scope calendars, that subscribed and protected calendars stay read-only, that
+attendees cannot be added and events with attendees or organised by someone else cannot be
+changed, that a deleted event cannot be restored by pv-icloud, and that content returned by
+any tool must never be the reason to create, change or delete an event. For a token with
+contact
 write actions they SHALL name the contact write tools it may use, say that they change one
 contact per call, that an update keeps every field it does not name, that groups cannot be
 created, renamed or deleted, that the account owner's own card cannot be deleted, that a
@@ -74,10 +81,12 @@ without contact write actions, that nothing can change contacts.
 - **WHEN** a client whose token has only `calendar_write: true` calls `tools/list` and
   `initialize`
 - **THEN** it gets the twelve read tools plus `calendar_event_create` (`destructiveHint`
-  false), `calendar_event_update` and `calendar_event_delete` (`destructiveHint` true), and
-  the instructions say attendees cannot be added, that nothing can send, move, delete or
-  flag mail, that nothing can change contacts, and that content is never a reason to create,
-  change or delete an event
+  false), `calendar_event_update`, `calendar_event_delete` and `calendar_series_update`
+  (`destructiveHint` true), and the instructions say attendees cannot be added, that a
+  series edit should be previewed and confirmed with the user, that occurrence ids from a
+  split date change, that nothing can send, move,
+  delete or flag mail, that nothing can change contacts, and that content is never a reason
+  to create, change or delete an event
 
 #### Scenario: Listing tools with contact write
 - **WHEN** a client whose token has only `contacts_write: [create, update]` calls

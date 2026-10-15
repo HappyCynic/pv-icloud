@@ -34,6 +34,15 @@ each version.
     again`. Nothing is retried.
   - Calendar writes count against the token's `max_writes_per_hour`, together with mail
     writes, and are audited with `"write": true` and no event content (not even times).
+- `calendar_series_update` ([ADR-0007](docs/adr/0007-calendar-series-edit.md)), for tokens
+  with `calendar_write`: changes a whole recurring series (`replace_all`, `update_all`) or a
+  series from a date on (`replace_from`, `update_from`). The `replace_*` modes discard
+  deleted and changed occurrences; the `update_*` modes keep them where they fit the new
+  pattern, list the rest in `unmatched`, and drop a changed occurrence only with
+  `drop_unmatched: true`. `preview` shows the result without changing anything (it counts
+  against the write limit). A change from a date splits the series as Apple Calendar does,
+  so ids of occurrences from that date change; a series split in Calendar is changed as one,
+  up to 10 parts, with field edits only across parts.
 - Opt-in contact writes ([ADR-0006](docs/adr/0006-opt-in-contact-write.md)), off by default:
   - Deployment switch `PV_ICLOUD_CONTACTS_WRITE=enabled`, independent of the mail and
     calendar switches. Without it nothing changes: the write code is not loaded, and a token

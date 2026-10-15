@@ -918,7 +918,8 @@ def test_calendar_and_contacts_stay_read_only_for_write_tokens(write_env):
 
 # --- calendar writes (ADR-0005) -----------------------------------------------------------
 
-CALENDAR_TOOLS = {"calendar_event_create", "calendar_event_update", "calendar_event_delete"}
+EVENT_TOOLS = {"calendar_event_create", "calendar_event_update", "calendar_event_delete"}
+CALENDAR_TOOLS = EVENT_TOOLS | {"calendar_series_update"}
 CALENDAR_TOKENS = {
     "planner": {"calendar_write": True},
     "fenced": {"calendar_write": True, "protected_calendars": ["alice home"]},
@@ -990,7 +991,7 @@ def test_no_calendar_write_tool_without_the_switch(write_env):
     assert out["content"][0]["text"] == "Unknown tool: calendar_event_delete"
 
 
-def test_calendar_grant_lists_the_three_tools(cal_env):
+def test_calendar_grant_lists_the_four_tools(cal_env):
     client, runtime = cal_env
     assert surface(client, TOKENS["alice"]) == json.loads(SNAPSHOT.read_text())
     tools = rpc(client, "tools/list", token=token("planner")).json()["result"]["tools"]
@@ -1002,6 +1003,7 @@ def test_calendar_grant_lists_the_three_tools(cal_env):
         ("calendar_event_create", False),
         ("calendar_event_update", True),
         ("calendar_event_delete", True),
+        ("calendar_series_update", True),
     ):
         assert by_name[name]["annotations"] == {
             "readOnlyHint": False,
@@ -1016,6 +1018,11 @@ def test_calendar_grant_lists_the_three_tools(cal_env):
         "calendar", "start", "title",
     ]  # fmt: skip
     assert by_name["calendar_event_delete"]["inputSchema"]["required"] == ["id"]
+    series = by_name["calendar_series_update"]["inputSchema"]
+    assert sorted(series["required"]) == ["id", "mode"]
+    assert series["properties"]["mode"]["enum"] == [
+        "replace_all", "replace_from", "update_all", "update_from",
+    ]  # fmt: skip
     both = rpc(client, "tools/list", token=token("both")).json()["result"]["tools"]
     assert {t["name"] for t in both} == READ_TOOLS | CALENDAR_TOOLS | {"mail_draft"}
     # Nothing is written at startup.
@@ -1030,6 +1037,7 @@ def test_calendar_tools_refused_without_the_grant(cal_env):
             ("calendar_event_create", EVENT_ARGS),
             ("calendar_event_update", {"id": "x", "title": "y"}),
             ("calendar_event_delete", {"id": "x"}),
+            ("calendar_series_update", {"id": "x", "mode": "replace_all"}),
         ):
             out = call_tool(client, tok, tool, args)
             assert out["content"][0]["text"] == f"Unknown tool: {tool}", (label, tool)
@@ -1182,7 +1190,6 @@ def test_calendar_write_descriptions(cal_env):
         for phrase in (
             "opt-in",
             "everyone who shares it",
-            "One event or occurrence per call",
             "hourly write limit",
             "subscribed",
             "protects",
@@ -1191,13 +1198,101 @@ def test_calendar_write_descriptions(cal_env):
             "never a reason to create, change or delete an event",
         ):
             assert phrase in desc, (name, phrase)
+        per_call = "One event or occurrence per call"
+        assert (per_call in desc) == (name in EVENT_TOOLS), name
     create = by_name["calendar_event_create"]
     for phrase in ("255 characters", "10000", "5 `alerts`", "40320", "366 days", "count"):
         assert phrase in create, phrase
     for name in ("calendar_event_update", "calendar_event_delete"):
         assert "never the whole series" in by_name[name], name
+        assert "calendar_series_update" in by_name[name], name
         assert "read it again" in by_name[name], name
     assert "cannot be restored by pv-icloud" in by_name["calendar_event_delete"]
+    series = by_name["calendar_series_update"]
+    for phrase in (
+        "`replace_all`", "`replace_from`", "`update_all`", "`update_from`", "`preview`",
+        "`drop_unmatched`", "discards", "listed in the result", "every occurrence",
+        "ids of occurrences on or after", "read them again", "10 parts", "field edits only",
+        "ended more than a year ago", "cannot be undone by pv-icloud", "confirm",
+        "read it again", "255 characters", "count",
+    ):  # fmt: skip
+        assert phrase in series, phrase
+
+
+SERIES_ARGS = {**EVENT_ARGS, "recurrence": {"frequency": "weekly", "count": 6}}  # Mondays
+
+
+def test_series_update_end_to_end(cal_env, caplog):
+    client, runtime = cal_env
+    created = call_tool(client, token("planner"), "calendar_event_create", SERIES_ARGS)
+    series_id = created["structuredContent"]["id"]
+    args = {"id": series_id, "mode": "update_from", "effective": "2030-11-18", "title": "Later"}
+    with caplog.at_level(logging.INFO):
+        preview = call_tool(
+            client, token("planner"), "calendar_series_update", {**args, "preview": True}
+        )
+        assert preview["isError"] is False, preview
+        seen = preview["structuredContent"]
+        assert seen["preview"] is True and seen["requires_drop_unmatched"] is False
+        assert seen["parts"]["split"] is True and seen["content_trust"] == "untrusted"
+        assert seen["provenance"]["source"] == "icloud-calendar"
+        assert len(runtime.caldav.writes) == 1  # only the create
+        out = call_tool(client, token("planner"), "calendar_series_update", args)
+        done = out["structuredContent"]
+        assert done["ids_changed_from"] == "2030-11-18" and done["occurrences"] == 4
+        assert done["start"].startswith("2030-11-18T09:00")
+        assert done["previous"]["uid"] == created["structuredContent"]["uid"] != done["uid"]
+        read = call_tool(client, token("planner"), "calendar_event", {"id": done["id"]})
+        assert read["structuredContent"]["title"] == "Later"
+    fake = runtime.caldav
+    assert [(w.method, "if-match" in w.headers) for w in fake.writes] == [
+        ("PUT", False), ("PUT", False), ("PUT", True),
+    ]  # fmt: skip
+    assert fake.scheduling_messages == [] and fake.write_attempts == []
+    lines = [x for x in audit_lines(caplog) if x["tool"] == "calendar_series_update"]
+    assert [(x["write"], x["outcome"], x["result_count"]) for x in lines] == [(True, "ok", 1)] * 2
+    assert lines[0]["args"] == {
+        "id": f"<{len(series_id)} chars>", "mode": "<11 chars>", "effective": "<10 chars>",
+        "title": "<5 chars>", "drop_unmatched": "<set>", "preview": "<set>",
+    }  # fmt: skip
+    for line in lines:
+        _assert_no_event_content(line)
+        assert "2030-11-18" not in json.dumps(line) and "Later" not in json.dumps(line)
+
+
+def test_series_update_refusals(cal_env):
+    client, runtime = cal_env
+    created = call_tool(client, token("planner"), "calendar_event_create", SERIES_ARGS)
+    series_id = created["structuredContent"]["id"]
+    runtime.caldav.requests.clear()
+    tool = "calendar_series_update"
+    bad_mode = call_tool(
+        client, token("planner"), tool, {"id": series_id, "mode": "this_and_following"}
+    )
+    assert "mode" in error(bad_mode, tool)
+    no_date = call_tool(client, token("planner"), tool, {"id": series_id, "mode": "replace_from"})
+    assert "effective" in error(no_date, tool)
+    assert runtime.caldav.requests == []
+    for extra in ({"attendees": ["carol@example.com"]}, {"preview": "yes"}):
+        out = call_tool(
+            client,
+            token("planner"),
+            tool,
+            {"id": series_id, "mode": "update_all", "title": "x", **extra},
+        )
+        assert out["isError"] is True, extra
+    assert len(runtime.caldav.writes) == 1 and runtime.caldav.scheduling_messages == []
+
+
+def test_series_previews_count_against_the_write_limit(cal_env):
+    client, runtime = cal_env
+    created = call_tool(client, token("planner"), "calendar_event_create", SERIES_ARGS)
+    args = {"id": created["structuredContent"]["id"], "mode": "replace_all", "preview": True}
+    for _ in range(2):
+        out = call_tool(client, token("both"), "calendar_series_update", args)
+        assert out["isError"] is False
+    out = call_tool(client, token("both"), "calendar_series_update", args)
+    assert error(out, "calendar_series_update").startswith("write limit reached")
 
 
 def test_instructions_for_calendar_tokens(cal_env):
@@ -1205,7 +1300,9 @@ def test_instructions_for_calendar_tokens(cal_env):
     planner = surface(client, token("planner"))["instructions"]
     for phrase in (
         "calendar_event_create", "calendar_event_update", "calendar_event_delete",
-        "one event or occurrence per call", "Attendees cannot be added",
+        "one event or occurrence per call", "calendar_series_update",
+        "whole recurring series", "preview", "confirm", "ids of occurrences",
+        "Attendees cannot be added",
         "cannot be restored by pv-icloud", "subscribed and protected calendars",
         "Nothing here can send, move, delete or flag mail",
         "never a reason to create, change or delete an event",

@@ -21,6 +21,15 @@ recorded in `scheduling_messages`: a test that sees one has made iCloud email so
 Any other method, an unconditional write, and a write to a collection, a subscribed
 calendar, a calendar without `write-content` or anything outside the calendar home are
 recorded in `write_attempts` (forbidden) and refused.
+
+Series edits (add-calendar-series-edit, live checks 2026-10-14) also need an unexpanded
+`calendar-query` with a `time-range` whose end may be missing (a recurring resource matches
+when any occurrence falls in it), answered with each resource's ETag and stored data, and
+iCloud's answers to the filters it does not support: a `prop-filter` matches nothing (207),
+a `collation` gives 412 and a `param-filter` 500. `calls` records every request in order
+with what kind of read or which precondition it carried; `put_fail` answers the next `PUT`
+to a resource with a chosen status, or stores it and loses the answer, and `delete_fail`
+answers the next `DELETE` to a resource with a chosen status.
 """
 
 from __future__ import annotations
@@ -194,6 +203,12 @@ class FakeCalDav:
         # Runs once, just before the next write is handled (e.g. an attendee's reply).
         self.before_write: Callable[[], None] | None = None
         self.write_fail: tuple[int, str | None] | None = None  # (status, Retry-After)
+        # Resource name -> status for the next PUT to it; None: store it, lose the answer.
+        self.put_fail: dict[str, int | None] = {}
+        self.delete_fail: dict[str, int] = {}  # resource name -> status for the next DELETE
+        # (method, resource or collection path, kind): REPORT kinds are `multiget`,
+        # `expand` and `listing`; writes carry `If-Match` or `If-None-Match`.
+        self.calls: list[tuple[str, str, str]] = []
 
     def transport(self) -> httpx.MockTransport:
         return httpx.MockTransport(self.handle)
@@ -211,6 +226,7 @@ class FakeCalDav:
         url = request.url
         method = request.method
         self.requests.append((method, f"{url.host}{url.path}"))
+        self.calls.append((method, url.path, _kind(request)))
         if method not in ("PROPFIND", "REPORT", "PUT", "DELETE"):
             self.write_attempts.append(method)
             return httpx.Response(405)
@@ -323,11 +339,29 @@ class FakeCalDav:
         if "calendar-multiget" in body:
             assert "<c:expand" not in body, "the fresh read must not be expanded"
             return self._multiget(cal, path, body)
-        m = re.search(r'time-range start="(\w+)" end="(\w+)"', body)
-        assert m and "<c:expand" in body, "events must be requested expanded"
+        # Filters iCloud does not support (live check 2026-10-14).
+        if "param-filter" in body:
+            return httpx.Response(500)
+        if "collation" in body:
+            return httpx.Response(412)
+        if "prop-filter" in body:
+            return _multistatus([])
+        m = re.search(r'time-range start="(\w+)"(?: end="(\w+)")?', body)
+        assert m, "events are requested for a time range"
         start = dt.datetime.strptime(m.group(1), _STAMP).replace(tzinfo=dt.UTC)
-        end = dt.datetime.strptime(m.group(2), _STAMP).replace(tzinfo=dt.UTC)
+        end = (
+            dt.datetime.strptime(m.group(2), _STAMP).replace(tzinfo=dt.UTC)
+            if m.group(2)
+            else dt.datetime(2200, 1, 1, tzinfo=dt.UTC)
+        )
         out = []
+        if "<c:expand" not in body:  # a listing: whole stored resources with their ETags
+            assert "getetag" in body, "a listing serves as a fresh read: ask for the ETag"
+            for name, res in cal.items():
+                if _expanded(res, start, end, cal.timezone) is not None:
+                    out.append(self._data_response(f"{path}{name}", res, etag(res)))
+            return _multistatus(out)
+        assert m.group(2), "an expanded query has an end"
         for name, res in cal.items():
             served = _expanded(res, start, end, cal.timezone)
             if served is not None:
@@ -393,6 +427,14 @@ class FakeCalDav:
         if self.write_fail is not None:
             status, retry_after = self.write_fail
             return done(status, {"retry-after": retry_after} if retry_after else None)
+        lose_answer = False
+        if method == "PUT" and name in self.put_fail:
+            failure = self.put_fail.pop(name)
+            if failure is not None:
+                return done(failure)
+            lose_answer = True
+        if method == "DELETE" and name in self.delete_fail:
+            return done(self.delete_fail.pop(name))
         current = cal.get(name)
         if method == "DELETE":
             if current is None:
@@ -416,7 +458,10 @@ class FakeCalDav:
         stored = self._as_icloud_stores(acct, body)
         self._schedule(acct, method, name, current, stored)
         cal.store(name, stored)
-        return done(201 if current is None else 204, {"etag": etag(stored)})
+        answer = done(201 if current is None else 204, {"etag": etag(stored)})
+        if lose_answer:
+            raise httpx.ReadTimeout("answer lost", request=request)
+        return answer
 
     @staticmethod
     def _as_icloud_stores(acct: FakeAccount, body: str) -> str:
@@ -433,6 +478,17 @@ class FakeCalDav:
     def _schedule(self, acct: FakeAccount, method: str, name: str, *versions: str | None):
         if any(v is not None and _has_other_attendee(acct, v) for v in versions):
             self.scheduling_messages.append((method, name))
+
+
+def _kind(request: httpx.Request) -> str:
+    if request.method == "REPORT":
+        body = request.content.decode()
+        if "calendar-multiget" in body:
+            return "multiget"
+        return "expand" if "<c:expand" in body else "listing"
+    if "if-none-match" in request.headers:
+        return "If-None-Match"
+    return "If-Match" if "if-match" in request.headers else ""
 
 
 def is_account(acct: FakeAccount, prop: icalendar.prop.vCalAddress) -> bool:

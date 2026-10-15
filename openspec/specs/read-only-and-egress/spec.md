@@ -218,7 +218,12 @@ and only: `PUT` of one event resource (`<name>.ics`, a direct child of a writabl
 the caller's account as defined by the `calendar-write-tools` capability) with
 `If-None-Match: *` to create or `If-Match` to update, and `DELETE` of one such resource with
 `If-Match`, where an `If-Match` ETag always comes from a read of that resource in the same
-call. Each SHALL carry `Schedule-Reply: F`. The server MUST NOT send `PUT` or `DELETE`
+call. Each SHALL carry `Schedule-Reply: F`. A call SHALL send at most one write request,
+except `calendar_series_update`, which SHALL send at most: one `PUT` with `If-Match` to each
+part of the series' recurrence set it changes (at most 10 parts, all in the series'
+calendar), and, when it splits a part from a date, one `PUT` with `If-None-Match: *` of one
+new resource before that part's `PUT` and, only when that part's `PUT` was refused, one
+`DELETE` with `If-Match` of the resource the same call created. The server MUST NOT send `PUT` or `DELETE`
 without one of those preconditions, to a calendar collection, or to a subscribed, protected
 or non-writable calendar; MUST NOT send a calendar write to any CardDAV URL; MUST NOT write
 `ORGANIZER` or `ATTENDEE`; and MUST NOT send `MKCALENDAR`, `MKCOL`, `PROPPATCH`, `MOVE`,
@@ -232,6 +237,32 @@ never retried automatically. Code that sends CalDAV `PUT` or `DELETE` SHALL live
   already cached
 - **THEN** iCloud sees one `REPORT` reading that resource and its ETag, then one `PUT` with
   `If-Match` set to that ETag and `Schedule-Reply: F`, and no other write request
+
+#### Scenario: Requests seen during a whole-series edit
+- **WHEN** a caller runs `calendar_series_update` with `update_all` on a series without a
+  recurrence-set `RELATED-TO`, and the calendar list and account addresses are already cached
+- **THEN** iCloud sees one `REPORT` reading the series' resource and its ETag, then one `PUT`
+  of that resource with `If-Match` set to that ETag, and no other write request
+
+#### Scenario: Requests seen during a series edit from a date
+- **WHEN** a caller runs `calendar_series_update` with `replace_from` on a series without a
+  recurrence-set `RELATED-TO` and nothing changes meanwhile
+- **THEN** iCloud sees one `REPORT` of the series' resource, one `PUT` of a new resource in the
+  same calendar with `If-None-Match: *`, then one `PUT` of the series' resource with
+  `If-Match` set to the ETag read, each with `Schedule-Reply: F`, and no `DELETE`
+
+#### Scenario: Rollback after a conflict
+- **WHEN** the second `PUT` of a series edit from a date is answered 412
+- **THEN** the only further requests are one `REPORT` of the new resource and one `DELETE` of
+  it with `If-Match` set to the ETag that `REPORT` returned, and nothing is retried
+
+#### Scenario: Requests seen during an edit of a split series
+- **WHEN** a caller runs `calendar_series_update` with `update_all` and a new title on a
+  series whose master carries a recurrence-set `RELATED-TO` shared by one other resource
+- **THEN** iCloud sees only `REPORT`s until every part has been read (the series' resource,
+  then `calendar-query` time-range listings of its calendar without a `prop-filter`,
+  `param-filter` or `collation`), then one `PUT` with `If-Match` of each of the two
+  resources, and no other write request
 
 #### Scenario: Calendar write switch off
 - **WHEN** the server runs without `PV_ICLOUD_CALENDAR_WRITE=enabled`

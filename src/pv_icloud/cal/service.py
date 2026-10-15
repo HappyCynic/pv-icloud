@@ -20,7 +20,7 @@ import icalendar
 
 from ..config import AccountConfig
 from ..dav import DavThrottled, home_may_have_moved
-from ..errors import ToolInputError
+from ..errors import SeriesWriteFailed, ToolInputError, WriteFailed
 from ..text import fold
 from .caldav import CalDavClient, CalDavError, CalendarInfo
 from .expand import expand
@@ -545,3 +545,140 @@ class CalendarService:
         else:
             writer.update(cal, eid.path, compose.to_text(ical), etag)
         return {"deleted": kind, "calendar": cal.name}
+
+    def update_series(
+        self,
+        event_id: str,
+        *,
+        mode: str,
+        changes: Changes,
+        effective: str | None = None,
+        recurrence: Mapping[str, Any] | None = None,
+        drop_unmatched: bool = False,
+        preview: bool = False,
+        protected: Sequence[str] = (),
+    ) -> dict:
+        """Change a whole series, or a series from a date on (ADR-0007). Everything is read,
+        checked and worked out before the first write; a preview stops there."""
+        from . import compose
+
+        writer = self._require_writer()
+        edit = compose.series_edit(mode, effective, changes, recurrence, drop_unmatched, preview)
+        cal, eid, ical, etag, target, tz = self._fresh(event_id, protected)
+        named = compose.Part(eid.path, etag, ical, compose.series_master(ical, target))
+        others: list[compose.Part] = []
+        searched_from = None
+        value = compose.recurrence_set(named.master)
+        if value is not None:  # the other parts of a series split in Calendar
+            today = dt.datetime.now(tz).date()
+            windows, searched_from = compose.part_windows(named, edit, tz, today)
+            listed = [item for lo, hi in windows for item in self.client.event_listing(cal, lo, hi)]
+            others = compose.pick_parts(listed, value, [eid.path])
+            if len(others) >= compose.PARTS_MAX:
+                raise ToolInputError(compose.TOO_MANY_PARTS)
+            addresses = self.client.account_addresses()
+            for part in others:
+                compose.check_people(part.cal, addresses)
+        uid = str(uuid.uuid4()).upper()
+        prefix = httpx.URL(cal.url).raw_path.decode("ascii").rstrip("/") + "/"
+        plan = compose.plan_series_edit(
+            named,
+            others,
+            edit,
+            tz,
+            self._now(),
+            new_uid=uid,
+            new_value=str(uuid.uuid4()).upper(),
+            new_path=f"{prefix}{uid}.ics",
+        )
+        out: dict[str, Any] = {
+            "mode": mode,
+            "preview": preview,
+            **self._written(cal, plan.first, True, tz, plan.first_path),
+            "occurrences": plan.occurrences,
+            "occurrences_through": plan.occurrences_through,
+            "exceptions": plan.exceptions,
+            "unmatched": plan.unmatched,
+            "parts": {
+                "found": plan.found,
+                "changed": plan.changed,
+                "split": plan.split,
+                "searched_from": searched_from,
+            },
+        }
+        if preview:
+            out["requires_drop_unmatched"] = plan.requires_drop_unmatched
+        if plan.split:
+            assert edit.effective is not None
+            out["previous"] = plan.previous
+            out["ids_changed_from"] = edit.effective.isoformat()
+        if not preview:
+            self._write_series(writer, cal, plan, edit.effective, out["id"])
+        return out
+
+    def _write_series(
+        self,
+        writer: CalDavWriter,
+        cal: CalendarInfo,
+        plan: Any,
+        effective: dt.date | None,
+        new_id: str,
+    ) -> None:
+        """A split's new resource first, then the cut (undone by deleting the new resource
+        if iCloud refused it), then every other part; nothing is retried."""
+        from .caldav_write import NOT_SENT, REFUSED
+
+        writes = list(plan.writes)
+        done: list[str] = []
+        if plan.split:
+            assert effective is not None
+            new, cut = writes.pop(0), writes.pop(0)
+            writer.create(cal, new.path.rsplit("/", 1)[1], new.text)  # fails: nothing changed
+            try:
+                writer.update(cal, cut.path, cut.text, cut.etag)
+            except (ToolInputError, WriteFailed) as exc:
+                refused = isinstance(exc, ToolInputError) or str(exc) in (REFUSED, NOT_SENT)
+                if refused and self._undo_create(writer, cal, new.path):
+                    raise  # the calendar is as it was
+                raise self._stored_twice(effective, new_id) from exc
+            except Exception as exc:  # no answer, throttled: the cut may have been made
+                raise self._stored_twice(effective, new_id) from exc
+            done.append(f"{cut.uid} (cut before {effective}) and its new series {new.uid}")
+        for write in writes:
+            try:
+                writer.update(cal, write.path, write.text, write.etag)
+            except Exception as exc:
+                if not done:
+                    raise  # nothing changed yet
+                reason = (
+                    str(exc)
+                    if isinstance(exc, (ToolInputError, WriteFailed))
+                    else "iCloud did not confirm the change"
+                )
+                raise SeriesWriteFailed(
+                    f"the series was changed only in part. Changed: {'; '.join(done)}. Not "
+                    f"changed: {write.uid} from {write.first} ({reason}), nor anything after "
+                    "it. Nothing was retried or undone: read the series again, then finish in "
+                    "Calendar or call again.",
+                    f"series edit stopped after {len(done)} of {len(plan.writes)} writes",
+                ) from exc
+            done.append(f"{write.uid} from {write.first}")
+
+    def _undo_create(self, writer: CalDavWriter, cal: CalendarInfo, path: str) -> bool:
+        """Delete the resource this call created a moment ago; False if that failed."""
+        try:
+            stored = self.client.event_resource(cal, path)
+            if stored is not None:
+                writer.delete(cal, path, stored[1])
+        except Exception:
+            return False
+        return True
+
+    @staticmethod
+    def _stored_twice(effective: dt.date, new_id: str) -> SeriesWriteFailed:
+        return SeriesWriteFailed(
+            f"iCloud did not confirm cutting the series before {effective}, so the series from "
+            f"{effective} may now be stored twice: check it in Calendar. The new series' id is "
+            f"{new_id} . Nothing was retried.",
+            "series split unconfirmed; the series may be stored twice",
+        )

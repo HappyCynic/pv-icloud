@@ -70,6 +70,7 @@ client and a CardDAV client with an in-memory contacts cache.
 | `calendar_event_create` | *Opt-in write.* Creates one event, single or recurring, without attendees |
 | `calendar_event_update` | *Opt-in write.* Changes the given fields of one event or one occurrence |
 | `calendar_event_delete` | *Opt-in write.* Deletes one event or one occurrence; cannot be undone |
+| `calendar_series_update` | *Opt-in write.* Changes a whole recurring series, or a series from a date on (`replace_all`, `replace_from`, `update_all`, `update_from`), with `preview` |
 | `contacts_create` | *Opt-in write.* Creates one contact, optionally in existing groups |
 | `contacts_update` | *Opt-in write.* Changes, adds or removes fields of one contact in place, and its group membership |
 | `contacts_delete` | *Opt-in write.* Deletes one contact (never the me-card); cannot be undone |
@@ -310,7 +311,8 @@ then the series is expanded locally (`cal/expand.py`) to find it. Changing one o
 edits its override, or adds one (a copy of the master without `RRULE`, `RDATE` and `EXDATE`,
 with `RECURRENCE-ID` the original start in the master's value type and zone); deleting one
 adds an `EXDATE` to the master and drops its override. A single event is deleted with
-`DELETE`. A whole series is never changed or deleted in one call. Every other component and
+`DELETE`. These three tools never change or delete a whole series; only
+`calendar_series_update` changes one (see [Series edits](#series-edits)). Every other component and
 property of the resource (other overrides, `VTIMEZONE`s, `X-APPLE-*` properties, alerts not
 being replaced) is kept; the changed component gets a higher `SEQUENCE` and new
 `LAST-MODIFIED`. New and moved times are written with `TZID` and a matching `VTIMEZONE`, never
@@ -327,6 +329,59 @@ or the principal path itself count as the account. Anything else, a principal pa
 known `EMAIL=` included, counts as someone else. The read tools take `email` from `EMAIL=` in
 the same way. The fake CalDAV server records every write that would make iCloud email
 someone, and the tests require that record to stay empty.
+
+### Series edits
+
+`calendar_series_update` ([ADR-0007](adr/0007-calendar-series-edit.md)) changes a whole
+recurring series, or a series from a date on, under the same switch, grant, fences and write
+limit (one call, a preview included, counts once). Its four modes:
+
+| Mode | Occurrences before `effective` | Deleted and changed occurrences in range |
+|---|---|---|
+| `replace_all` | (no date) | discarded |
+| `replace_from` | as stored | discarded |
+| `update_all` | (no date) | kept where they fit the new pattern |
+| `update_from` | as stored | kept where they fit the new pattern |
+
+- **The new definition.** The fields of `calendar_event_update` plus `recurrence` (as for
+  `calendar_event_create`; it replaces the rule). Fields not given keep the series' values;
+  `start` and `end` are the times of the first changed occurrence. The new `DTSTART` is the
+  first occurrence the new rule generates from there, so no occurrence outside the rule is
+  added (RFC 5545 always counts `DTSTART`). `start`, `end`, `all_day`, `timezone` and
+  `recurrence` are *pattern* fields; title, location, notes and alerts are *field edits*.
+- **Matching exceptions** (`update_*`). An `EXDATE` or override is kept when the new series
+  has exactly one occurrence on the day of its original start (in the series' zone); it is
+  re-keyed to that occurrence. A kept override takes a changed field only where it still had
+  the series' value, as Apple's apps do, and its times only if it was not moved. Changing
+  `all_day` keeps no override. Exceptions that no longer fit are listed in `unmatched`: a
+  deleted one is dropped; a changed one fails the call unless `drop_unmatched: true`.
+- **From a date, as Apple Calendar does.** The stored series is *cut*: its rule gets
+  `UNTIL` = 23:59:59 local time on the day before `effective`, written in UTC (a `DATE` for
+  an all-day series), replacing a `COUNT`, and loses its exceptions from the date on;
+  everything earlier is kept as stored. The rest becomes a new series (new `UID`, a copy of
+  the master's properties and alarms, no `ORGANIZER` or `ATTENDEE`) in a new resource. Both
+  carry one `RELATED-TO;RELTYPE=X-CALENDARSERVER-RECURRENCE-SET` value, as does every
+  override pv-icloud creates or re-keys. Ids of occurrences from the date change; the result
+  says so (`ids_changed_from`). When `effective` is on or before the series' first
+  occurrence, nothing is cut and the series is changed in place (`parts.split: false`).
+- **Order of writes.** Everything is read, checked and worked out first (a preview stops
+  there). Then the new resource (`If-None-Match: *`), then the cut (`If-Match`). If the cut
+  is refused (412, 404 or another 4xx), the new resource is read once and deleted with
+  `If-Match`, so the calendar is as it was. If the cut gets no answer or is throttled, or the
+  rollback fails, nothing more is sent and the error says the series may be stored twice,
+  naming the new series' id. Nothing is retried.
+- **Series split in Calendar.** Apple treats every resource sharing a recurrence-set value
+  (a *part*) as one series, and so does this tool, for up to 10 parts in the series'
+  calendar. iCloud does not support property filters in `calendar-query` (a `prop-filter`
+  matches nothing, a `collation` gives 412, a `param-filter` 500), so parts are found with
+  read-only, unexpanded time-range listings of that calendar, matched locally: from the
+  named part's last occurrence (or from `effective`) with no end, and, in the `_all` modes
+  only, from 366 days before today to the named part's first occurrence. Older parts are not
+  found or changed (`parts.searched_from`). Across parts only field edits are applied, one
+  `PUT` with `If-Match` per part; a pattern change or `replace_*` that would reach more than
+  one part is refused. A failure after the first write stops the call and the error names the
+  parts already changed (only a summary is logged); nothing is undone except a split's own
+  new resource.
 
 `tests/test_repo_policy.py` checks that `PUT` and `DELETE` are used as HTTP methods only in
 `cal/caldav_write.py`, that no source sends `MKCALENDAR`, `MKCOL`, `PROPPATCH`, `MOVE`,

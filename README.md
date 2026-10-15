@@ -110,6 +110,7 @@ saw before.
 | `calendar_event_create` | Create one event, single or recurring: title, start and end (timed, or all-day dates), time zone, location, notes, display alerts, and a simple `recurrence` (daily, weekly on chosen days, monthly or yearly; `interval`; `count` or `until`) |
 | `calendar_event_update` | Change the given fields of one event, or of **one occurrence** of a series (the others stay as they are); `clear` removes location, notes or alerts |
 | `calendar_event_delete` | Delete one event, or one occurrence of a series. **Cannot be undone** by pv-icloud. |
+| `calendar_series_update` | Change a **whole recurring series**, or a series **from a date** on ([ADR-0007](docs/adr/0007-calendar-series-edit.md)). `replace_all` / `replace_from` give the new definition to every occurrence and **discard** deleted and changed occurrences; `update_all` / `update_from` keep them where they fit the new pattern. `preview` shows the outcome without changing anything. |
 
 - **Which calendars:** only in-scope calendars of the account that it may change: its own,
   and calendars shared with it read-write (a change there is seen by everyone sharing it).
@@ -134,11 +135,19 @@ saw before.
 - **Limits:** one event per call; title up to 255 characters, location 1000, notes 10,000; at
   most 5 alerts; an event lasts at most 366 days. The token's `max_writes_per_hour` counts
   mail and calendar writes together.
+- **Series edits** (`calendar_series_update`) can change every occurrence of a series in one
+  call, and the `replace_*` modes discard its deleted and changed occurrences: preview first
+  and confirm with the user. In the `update_*` modes, occurrences that no longer fit a new
+  pattern are listed (`unmatched`); a changed one is dropped only with `drop_unmatched:
+  true`. A change from a date splits the series as Apple Calendar does (the rest becomes a
+  new series, so ids of occurrences from that date change). A series already split in
+  Calendar is changed as one, up to 10 parts, with field edits only across parts; parts that
+  ended more than a year ago are not changed.
 - Write calls are audited with `"write": true` and no event content: no title, notes,
   location, times, time zone or calendar name.
 
-Out of scope: attendees, moving an event to another calendar, editing or deleting a whole
-series at once ("this and following"), creating or deleting calendars, and Reminders.
+Out of scope: attendees, moving an event to another calendar, deleting a whole series at
+once, creating or deleting calendars, and Reminders.
 
 ### Contact writes (opt-in)
 
