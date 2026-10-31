@@ -3,7 +3,7 @@
 
 # Dev image for pv-icloud. The production image is a separate, slim,
 # non-root Dockerfile at the repo root; this one carries the dev tooling.
-FROM mcr.microsoft.com/devcontainers/python:3-3.14-trixie@sha256:28835c112fd097cb6d2fe1e195b660d66ae051859070a9b871fa2308f35897d3
+FROM mcr.microsoft.com/devcontainers/python:3.15-trixie@sha256:eb39f07323784af4c7558396808ceb01dacbe6dd7c63614f34d0235d0344a0ff
 
 # uv (pinned minor) for dependency management and running tools.
 COPY --from=ghcr.io/astral-sh/uv:0.12@sha256:3af4716e991d6956a41e573eab705d0ee08500cd829ed30293eb8472f372c65a /uv /uvx /usr/local/bin/
